@@ -50,7 +50,7 @@ export const logger = {
 
   banner() {
     console.log(chalk.bold.hex('#3498db')('\n╭───────────────────────────────────────────────────╮'));
-    console.log(chalk.bold.hex('#3498db')('│') + chalk.bold.white('  📱 Linksy  — Reverse USB Tethering for Linux     ') + chalk.bold.hex('#3498db')('│'));
+    console.log(chalk.bold.hex('#3498db')('│') + chalk.bold.white('  📱 Linksy PhoneNet — Reverse USB Tethering       ') + chalk.bold.hex('#3498db')('│'));
     console.log(chalk.bold.hex('#3498db')('│') + chalk.dim('  Share your Wi-Fi connection over USB effortlessly') + chalk.bold.hex('#3498db')('│'));
     console.log(chalk.bold.hex('#3498db')('╰───────────────────────────────────────────────────╯\n'));
   }

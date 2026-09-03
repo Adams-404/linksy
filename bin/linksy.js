@@ -12,7 +12,7 @@ import { uninstallCommand } from '../src/commands/uninstall.js';
 const program = new Command();
 
 program
-  .name('linksy')
+  .name('linksy-phonenet')
   .description('Reverse USB tethering CLI for Linux — share laptop Wi-Fi with Android without root')
   .version('1.0.0')
   .option('--verbose', 'Show detailed error output and debug messages')

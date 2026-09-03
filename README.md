@@ -1,4 +1,4 @@
-# Linksy 📱⚡
+# Linksy PhoneNet 📱⚡
 
 > **Effortless reverse USB tethering for Linux.**  
 > Share your laptop's Wi-Fi internet connection to your Android phone over a USB cable — no root required.
@@ -11,26 +11,26 @@
 
 ## The Problem & The Solution
 
-Most laptop Wi-Fi cards (particularly Intel `iwlwifi` and similar single-radio chips) cannot run in Access Point (AP / hotspot) mode while remaining connected to a Wi-Fi network. In practice, attempting to activate an `nmcli` or GUI hotspot drops the laptop's existing wireless connection. The reliable wireless-radio-free solution is **reverse USB tethering**: your laptop stays connected to Wi-Fi, and shares that connection with your Android device over a standard USB cable using a VPN-style bridge. **Linksy** wraps `adb` and `gnirehtet` into a friendly, single-command CLI experience that handles dependency installation, binary resolution, phone detection, and daemon management with zero manual file hunting.
+Most laptop Wi-Fi cards (particularly Intel `iwlwifi` and similar single-radio chips) cannot run in Access Point (AP / hotspot) mode while remaining connected to a Wi-Fi network. In practice, attempting to activate an `nmcli` or GUI hotspot drops the laptop's existing wireless connection. The reliable wireless-radio-free solution is **reverse USB tethering**: your laptop stays connected to Wi-Fi, and shares that connection with your Android device over a standard USB cable using a VPN-style bridge. **Linksy PhoneNet** wraps `adb` and `gnirehtet` into a friendly, single-command CLI experience that handles dependency installation, binary resolution, phone detection, and daemon management with zero manual file hunting.
 
 ---
 
 ## Installation
 
-### One-line Setup (No global install required)
+### One-line Setup
 
 ```bash
-npx linksy setup
+npx linksy-phonenet setup
 ```
 
 ### Or install globally via npm
 
 ```bash
-npm install -g linksy
-linksy setup
+npm install -g linksy-phonenet
+linksy-phonenet setup
 ```
 
-`linksy setup` will:
+`linksy-phonenet setup` will:
 1. Detect your Linux distribution.
 2. Check for `adb` (Android Debug Bridge) and offer to install it automatically via your package manager (`dnf`, `apt`, `pacman`, or `zypper`) if missing.
 3. Inspect your Wi-Fi interface capabilities (`iw list`) and let you know if your hardware supports concurrent hotspot mode.
@@ -41,29 +41,40 @@ linksy setup
 
 ## Daily Usage
 
+You can use either the direct shortcut commands or the subcommand style:
+
+### Direct Shortcuts
 | Command | Description |
 | :--- | :--- |
-| `linksy on` | Start reverse tethering in background (or pass `-f` / `--foreground`) |
-| `linksy off` | Stop reverse tethering and disconnect the phone tunnel |
-| `linksy status` | Display Gnirehtet install, connected phone, and tethering state |
-| `linksy doctor` | Run 4-step diagnostic checks with actionable fix suggestions |
-| `linksy uninstall` | Clean up `~/.linksy/` binaries and temporary files |
+| `phonenet-on` | Start reverse tethering immediately in background |
+| `phonenet-off` | Stop reverse tethering and disconnect tunnel |
+| `phonenet-status` | Check tethering state and phone connection |
+| `phonenet-doctor` | Run diagnostic troubleshooting checks |
+
+### Subcommands (`phonenet` or `linksy-phonenet`)
+| Command | Description |
+| :--- | :--- |
+| `phonenet on` / `linksy-phonenet on` | Start reverse tethering (pass `-f` for foreground) |
+| `phonenet off` / `linksy-phonenet off` | Stop reverse tethering |
+| `phonenet status` | Display Gnirehtet install, connected phone, and tethering state |
+| `phonenet doctor` | Run 4-step diagnostic checks with actionable fix suggestions |
+| `phonenet uninstall` | Clean up `~/.linksy/` binaries and temporary files |
 
 ### Example Workflow
 
 ```bash
 # 1. Plug in your Android phone via USB
-# 2. Start tethering
-linksy on
+# 2. Turn on tethering
+phonenet-on
 
 # 3. Unlock phone and accept the VPN prompt on screen
 # Enjoy shared high-speed internet!
 
 # 4. Check connection status
-linksy status
+phonenet-status
 
-# 5. Stop when finished
-linksy off
+# 5. Turn off when finished
+phonenet-off
 ```
 
 ---
