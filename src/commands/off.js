@@ -38,7 +38,7 @@ export async function offCommand() {
     } catch {}
   }
 
-  // 2. Also run `gnirehtet stop` to signal the phone app to close the VPN tunnel cleanly
+  // 2. Also run `gnirehtet stop` and remove adb reverse tunnels
   if (fs.existsSync(GNIREHTET_BIN)) {
     try {
       execSync(`"${GNIREHTET_BIN}" stop`, {
@@ -50,6 +50,10 @@ export async function offCommand() {
       logger.debug(`gnirehtet stop returned: ${err.message}`);
     }
   }
+
+  try {
+    execSync('adb reverse --remove-all', { stdio: 'ignore' });
+  } catch {}
 
   if (stoppedProcess) {
     logger.success(chalk.bold.green('Reverse USB tethering stopped successfully.'));

@@ -84,11 +84,18 @@ export async function onCommand(options = {}) {
   const authorizedDevice = deviceStatus.devices.find(d => d.isAuthorized);
   logger.info(`Detected Android device: ${chalk.green(authorizedDevice.serial)}`);
 
+  // Clean any stale adb reverse tunnels from previous runs
+  try {
+    execSync('adb reverse --remove-all', { stdio: 'ignore' });
+  } catch {}
+
+  const runArgs = ['run', authorizedDevice.serial];
+
   // 5. Start Gnirehtet
   if (options.foreground) {
     logger.info('Starting Gnirehtet in foreground mode (Ctrl+C to stop)...');
     try {
-      const child = spawn(GNIREHTET_BIN, ['run'], {
+      const child = spawn(GNIREHTET_BIN, runArgs, {
         stdio: 'inherit',
         env: { ...process.env, PATH: process.env.PATH }
       });
@@ -99,6 +106,7 @@ export async function onCommand(options = {}) {
         try {
           if (fs.existsSync(PID_FILE)) fs.unlinkSync(PID_FILE);
           execSync(`"${GNIREHTET_BIN}" stop`, { stdio: 'ignore' });
+          execSync('adb reverse --remove-all', { stdio: 'ignore' });
         } catch {}
         process.exit(0);
       };
@@ -124,7 +132,7 @@ export async function onCommand(options = {}) {
     const logFd = fs.openSync(LOG_FILE, 'a');
 
     try {
-      const child = spawn(GNIREHTET_BIN, ['run'], {
+      const child = spawn(GNIREHTET_BIN, runArgs, {
         detached: true,
         stdio: ['ignore', logFd, logFd],
         env: { ...process.env, PATH: process.env.PATH }
@@ -151,7 +159,7 @@ export async function onCommand(options = {}) {
 
       logger.success(chalk.bold.green('Reverse USB tethering is now active! (PID: ' + pid + ')'));
       console.log('\n' + chalk.bold('Important:') + ' Check your phone screen now and ' + chalk.bold.cyan('approve the connection prompt') + ' (VPN request).');
-      console.log('Run ' + chalk.bold.cyan('linksy off') + ' to stop tethering at any time.\n');
+      console.log('Run ' + chalk.bold.cyan('phonenet-off') + ' (or ' + chalk.cyan('phonenet off') + ') to stop tethering at any time.\n');
     } catch (err) {
       logger.error('Failed to launch Gnirehtet:', err);
       process.exit(1);

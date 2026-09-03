@@ -14,7 +14,7 @@ const program = new Command();
 program
   .name('linksy-phonenet')
   .description('Reverse USB tethering CLI for Linux — share laptop Wi-Fi with Android without root')
-  .version('1.0.0')
+  .version('1.0.1')
   .option('--verbose', 'Show detailed error output and debug messages')
   .hook('preAction', (thisCommand) => {
     const opts = thisCommand.opts();
