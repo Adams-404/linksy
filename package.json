@@ -1,0 +1,39 @@
+{
+  "name": "linksy",
+  "version": "1.0.0",
+  "description": "Reverse USB tethering CLI for Linux — share laptop Wi-Fi with your Android phone over USB without root",
+  "main": "src/bin/linksy.js",
+  "bin": {
+    "linksy": "./bin/linksy.js"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node ./bin/linksy.js",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "tethering",
+    "usb-tethering",
+    "android",
+    "hotspot",
+    "wifi",
+    "linux",
+    "gnirehtet",
+    "adb"
+  ],
+  "author": "Adam",
+  "license": "MIT",
+  "dependencies": {
+    "adm-zip": "^0.5.16",
+    "chalk": "^5.4.1",
+    "commander": "^13.1.0",
+    "ora": "^8.2.0"
+  },
+  "devDependencies": {
+    "vitest": "^3.0.7"
+  }
+}

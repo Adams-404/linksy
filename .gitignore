@@ -1,0 +1,6 @@
+node_modules/
+.linksy/
+*.log
+coverage/
+.DS_Store
+*.zip
