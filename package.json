@@ -31,6 +31,20 @@
     "gnirehtet",
     "adb"
   ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Adams-404/linksy.git"
+  },
+  "homepage": "https://github.com/Adams-404/linksy#readme",
+  "bugs": {
+    "url": "https://github.com/Adams-404/linksy/issues"
+  },
+  "files": [
+    "bin",
+    "src",
+    "README.md",
+    "LICENSE"
+  ],
   "author": "Adam",
   "license": "MIT",
   "dependencies": {
