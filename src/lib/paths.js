@@ -16,3 +16,5 @@ export const WIFI_CONFIG_FILE = path.join(WIFI_DIR, 'hostapd.conf');
 export const BT_DIR = path.join(LINKSY_DIR, 'bluetooth');
 export const BT_PID_FILE = path.join(LINKSY_DIR, 'bluetooth.pid');
 export const BT_LOG_FILE = path.join(LINKSY_DIR, 'bluetooth.log');
+
+export const CONFIG_FILE = path.join(LINKSY_DIR, 'config.json');

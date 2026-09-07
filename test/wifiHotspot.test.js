@@ -68,7 +68,7 @@ describe('wifiHotspot - generateHostapdConfig', () => {
     const conf = generateHostapdConfig({
       apIface: 'ap0',
       ssid: 'TestHotspot',
-      password: 'password123',
+      password: 'mock_hotspot_key',
       channel: 157,
       hwMode: 'a'
     });
@@ -79,14 +79,14 @@ describe('wifiHotspot - generateHostapdConfig', () => {
     expect(conf).toContain('channel=157');
     expect(conf).toContain('ieee80211ac=1');
     expect(conf).toContain('wpa=2');
-    expect(conf).toContain('wpa_passphrase=password123');
+    expect(conf).toContain('wpa_passphrase=mock_hotspot_key');
   });
 
   it('generates valid hostapd configuration for 2.4GHz', () => {
     const conf = generateHostapdConfig({
       apIface: 'wlan0_ap',
       ssid: 'GuestWifi',
-      password: 'mypassword',
+      password: 'mock_hotspot_key',
       channel: 11,
       hwMode: 'g'
     });
@@ -96,7 +96,23 @@ describe('wifiHotspot - generateHostapdConfig', () => {
     expect(conf).toContain('hw_mode=g');
     expect(conf).toContain('channel=11');
     expect(conf).not.toContain('ieee80211ac=1');
-    expect(conf).toContain('wpa_passphrase=mypassword');
+    expect(conf).toContain('wpa_passphrase=mock_hotspot_key');
+  });
+
+  it('generates open network configuration when password is null or not provided', () => {
+    const conf = generateHostapdConfig({
+      apIface: 'ap0',
+      ssid: 'OpenHotspot',
+      password: null,
+      channel: 157,
+      hwMode: 'a'
+    });
+
+    expect(conf).toContain('interface=ap0');
+    expect(conf).toContain('ssid=OpenHotspot');
+    expect(conf).toContain('auth_algs=1');
+    expect(conf).not.toContain('wpa=2');
+    expect(conf).not.toContain('wpa_passphrase=');
   });
 });
 

@@ -77,8 +77,19 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 # Start concurrent Wi-Fi hotspot on the matching channel
 linksy on --wifi
 
-# On your phone: Open Wi-Fi settings, connect to "Linksy-Hotspot" (password: linksy12345)
+# Or specify a custom network name and password (saved as your default):
+linksy on --wifi --ssid "MyNetwork" --password "<your-password>"
+# Shorthand:
+linksy on -w -s "MyNetwork" -p "<your-password>"
+
+# Or run with NO password (open network):
+linksy on --wifi --no-password
+
+# On your phone: Open Wi-Fi settings, connect to your network
 # Enjoy high-speed wireless internet shared from your laptop!
+
+# Check connection status & password anytime:
+linksy status
 
 # Disconnect when finished
 linksy off

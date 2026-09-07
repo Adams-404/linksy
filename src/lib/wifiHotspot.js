@@ -9,6 +9,7 @@ import {
   WIFI_LOG_FILE,
   WIFI_CONFIG_FILE
 } from './paths.js';
+import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
 import { logger } from '../utils/logger.js';
 
@@ -164,6 +165,8 @@ export function generateHostapdConfig({
       'wpa_key_mgmt=WPA-PSK',
       'rsn_pairwise=CCMP'
     );
+  } else {
+    lines.push('auth_algs=1');
   }
 
   return lines.join('\n') + '\n';
@@ -268,10 +271,60 @@ export async function startWifiHotspot(options = {}) {
     process.exit(1);
   }
 
+  const wantsOpen =
+    options.noPassword === true ||
+    options.open === true ||
+    options.password === '' ||
+    (typeof options.password === 'string' && ['none', 'open', 'false', 'no'].includes(options.password.toLowerCase()));
+
+  const hasCredentialChange =
+    options.password !== undefined ||
+    options.ssid !== undefined ||
+    options.noPassword !== undefined ||
+    options.open !== undefined;
+
   if (isHotspotRunning()) {
-    logger.warn('Wi-Fi hotspot is already active.');
-    logger.info(`Run ${chalk.bold.cyan('linksy off')} to stop it, or ${chalk.bold.cyan('linksy status')} for details.`);
-    return;
+    if (hasCredentialChange) {
+      logger.info('Hotspot is currently active. Updating credentials and restarting hotspot...');
+      stopWifiHotspot();
+      await new Promise(resolve => setTimeout(resolve, 1000));
+    } else {
+      logger.warn('Wi-Fi hotspot is already active.');
+      logger.info(`Run ${chalk.bold.cyan('linksy off')} to stop it, or ${chalk.bold.cyan('linksy status')} for details.`);
+      return;
+    }
+  }
+
+  const saved = getSavedConfig();
+  const apIface = options.apIface || 'ap0';
+  const ssid = options.ssid || saved.wifiSsid || 'Linksy-Hotspot';
+
+  let password;
+  if (wantsOpen) {
+    password = null;
+  } else if (options.password) {
+    password = options.password;
+  } else if (saved.wifiPassword === null || saved.wifiPassword === 'none' || saved.wifiPassword === '') {
+    password = null;
+  } else if (saved.wifiPassword) {
+    password = saved.wifiPassword;
+  } else {
+    password = 'linksy12345';
+  }
+
+  if (password) {
+    if (password.length < 8 || password.length > 63) {
+      logger.error(`Invalid Wi-Fi password length (${password.length} characters).`);
+      logger.info('WPA2-PSK passphrases must be between 8 and 63 characters long (or use --no-password for an open network).');
+      process.exit(1);
+    }
+  }
+
+  if (hasCredentialChange) {
+    saveConfig({
+      wifiSsid: ssid,
+      wifiPassword: password || 'none'
+    });
   }
 
   if (!ensureWifiDependencies()) {
@@ -292,10 +345,6 @@ export async function startWifiHotspot(options = {}) {
   if (!fs.existsSync(WIFI_DIR)) {
     fs.mkdirSync(WIFI_DIR, { recursive: true });
   }
-
-  const apIface = options.apIface || 'ap0';
-  const ssid = options.ssid || 'Linksy-Hotspot';
-  const password = options.password || 'linksy12345';
 
   const configContent = generateHostapdConfig({
     apIface,
@@ -421,7 +470,7 @@ iw dev "$AP_IFACE" del 2>/dev/null || true
   console.log(
     '\n' + chalk.bold.cyan('📡 Wi-Fi Hotspot Details:\n') +
     `  • Network Name (SSID): ${chalk.bold.green(ssid)}\n` +
-    `  • Password:            ${chalk.bold.yellow(password)}\n` +
+    `  • Password:            ${password ? chalk.bold.yellow(password) : chalk.bold.magenta('None (Open Network)')}\n` +
     `  • Channel:             ${chalk.cyan(activeWifi.channel)} (${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'})\n` +
     `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n\n` +
     `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
