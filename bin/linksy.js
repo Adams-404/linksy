@@ -37,7 +37,11 @@ program
 
 program
   .command('on')
-  .description('Start reverse tethering to share internet with connected Android phone')
+  .description('Start reverse tethering to share internet (USB, Wi-Fi, or Bluetooth)')
+  .option('-w, --wifi', 'Share internet wirelessly via concurrent Wi-Fi AP+STA hotspot (no USB cable)')
+  .option('-b, --bluetooth', 'Share internet wirelessly via Bluetooth reverse tethering (no USB cable)')
+  .option('--ssid <name>', 'Custom Wi-Fi hotspot SSID (default: Linksy-Hotspot)')
+  .option('--password <pass>', 'Custom Wi-Fi hotspot password (default: linksy12345)')
   .option('-f, --foreground', 'Run Gnirehtet in foreground instead of detached background')
   .action(async (options) => {
     try {

@@ -3,6 +3,8 @@ import chalk from 'chalk';
 import { GNIREHTET_BIN, PID_FILE } from '../lib/paths.js';
 import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { isProcessRunning } from './on.js';
+import { getWifiHotspotStatus } from '../lib/wifiHotspot.js';
+import { getBluetoothPanStatus } from '../lib/bluetoothPan.js';
 import { logger } from '../utils/logger.js';
 
 export async function statusCommand() {
@@ -12,12 +14,12 @@ export async function statusCommand() {
   // 1. Gnirehtet installation
   const isGnirehtetInstalled = fs.existsSync(GNIREHTET_BIN);
   if (isGnirehtetInstalled) {
-    console.log(chalk.green('✔') + ' Gnirehtet binary: ' + chalk.bold('Installed') + chalk.dim(` (${GNIREHTET_BIN})`));
+    console.log(chalk.green('✔') + ' Gnirehtet binary:     ' + chalk.bold('Installed') + chalk.dim(` (${GNIREHTET_BIN})`));
   } else {
-    console.log(chalk.red('✖') + ' Gnirehtet binary: ' + chalk.red('Not installed') + chalk.dim(' (Run `linksy setup` to install)'));
+    console.log(chalk.red('✖') + ' Gnirehtet binary:     ' + chalk.red('Not installed') + chalk.dim(' (Run `linksy setup` to install)'));
   }
 
-  // 2. Tethering status
+  // 2. USB Tethering status
   let isTetheringActive = false;
   let activePid = null;
   if (fs.existsSync(PID_FILE)) {
@@ -30,34 +32,51 @@ export async function statusCommand() {
   }
 
   if (isTetheringActive) {
-    console.log(chalk.green('✔') + ' Tethering state:   ' + chalk.bold.green('ACTIVE') + chalk.dim(` (PID: ${activePid})`));
+    console.log(chalk.green('✔') + ' USB Tethering:        ' + chalk.bold.green('ACTIVE') + chalk.dim(` (PID: ${activePid})`));
   } else {
-    console.log(chalk.yellow('○') + ' Tethering state:   ' + chalk.dim('Inactive'));
+    console.log(chalk.yellow('○') + ' USB Tethering:        ' + chalk.dim('Inactive'));
   }
 
-  // 3. Android phone detection
+  // 3. Wi-Fi Hotspot status
+  const wifiStatus = getWifiHotspotStatus();
+  if (wifiStatus.running) {
+    console.log(chalk.green('✔') + ' Wi-Fi Hotspot:        ' + chalk.bold.green('ACTIVE') + chalk.dim(` (${wifiStatus.ssid || 'Hotspot'}, Ch ${wifiStatus.channel || '?'}, PID: ${wifiStatus.pid})`));
+  } else {
+    console.log(chalk.yellow('○') + ' Wi-Fi Hotspot:        ' + chalk.dim('Inactive (Run `linksy on --wifi` to start)'));
+  }
+
+  // 4. Bluetooth PAN status
+  const btStatus = getBluetoothPanStatus();
+  if (btStatus.running) {
+    console.log(chalk.green('✔') + ' Bluetooth PAN:        ' + chalk.bold.green('ACTIVE') + chalk.dim(` (Bridge: ${btStatus.bridge}, PID: ${btStatus.pid})`));
+  } else {
+    console.log(chalk.yellow('○') + ' Bluetooth PAN:        ' + chalk.dim('Inactive (Run `linksy on --bluetooth` to start)'));
+  }
+
+  // 5. Android phone detection (USB)
   const deviceStatus = checkDeviceStatus();
   if (!deviceStatus.adbAvailable) {
-    console.log(chalk.red('✖') + ' Android device:    ' + chalk.red('adb not available or failed'));
+    console.log(chalk.red('✖') + ' Android device (USB): ' + chalk.red('adb not available or failed'));
   } else if (!deviceStatus.hasAnyDevice) {
-    console.log(chalk.yellow('○') + ' Android device:    ' + chalk.dim('No device connected over USB'));
+    console.log(chalk.yellow('○') + ' Android device (USB): ' + chalk.dim('No device connected over USB'));
   } else {
     for (const dev of deviceStatus.devices) {
       if (dev.isAuthorized) {
-        console.log(chalk.green('✔') + ` Android device:    ${chalk.bold(dev.serial)} ` + chalk.green('(' + dev.state + ')'));
+        console.log(chalk.green('✔') + ` Android device (USB): ${chalk.bold(dev.serial)} ` + chalk.green('(' + dev.state + ')'));
       } else {
-        console.log(chalk.yellow('⚠') + ` Android device:    ${chalk.bold(dev.serial)} ` + chalk.yellow('(' + dev.state + ' - authorization required on phone)'));
+        console.log(chalk.yellow('⚠') + ` Android device (USB): ${chalk.bold(dev.serial)} ` + chalk.yellow('(' + dev.state + ' - authorization required on phone)'));
       }
     }
   }
 
   console.log('\n' + chalk.dim('----------------------------'));
-  if (isTetheringActive) {
-    console.log(`Run ${chalk.cyan('linksy off')} to disconnect.`);
-  } else if (isGnirehtetInstalled && deviceStatus.hasAuthorizedDevice) {
-    console.log(`Ready! Run ${chalk.cyan('linksy on')} to begin reverse tethering.`);
+  if (isTetheringActive || wifiStatus.running || btStatus.running) {
+    console.log(`Run ${chalk.cyan('linksy off')} to disconnect all active connections.`);
   } else {
-    console.log(`Run ${chalk.cyan('linksy doctor')} to troubleshoot any connection issues.`);
+    console.log(`To start sharing internet:`);
+    console.log(`  • Wirelessly via Wi-Fi:     ${chalk.cyan('linksy on --wifi')}`);
+    console.log(`  • Wirelessly via Bluetooth: ${chalk.cyan('linksy on --bluetooth')}`);
+    console.log(`  • Over USB cable:           ${chalk.cyan('linksy on')}`);
   }
   console.log('');
 }

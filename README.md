@@ -41,39 +41,67 @@ linksy-phonenet setup
 
 ## Daily Usage
 
-You can use either the direct shortcut commands or the subcommand style:
+You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wireless)**, or **USB Cable (Wired)**:
+
+### Connection Modes
+
+| Mode | Command | Best For | Description |
+| :--- | :--- | :--- | :--- |
+| **Wi-Fi Hotspot (Wireless)** | `linksy on --wifi`<br>`phonenet-on -w` | High-speed wireless | Broadcasts a concurrent Wi-Fi hotspot on the matching channel. Connect your phone via standard Wi-Fi (no cable or phone app needed). |
+| **Bluetooth (Wireless)** | `linksy on --bluetooth`<br>`phonenet-on -b` | Universal wireless fallback | Reverse tethers over Bluetooth PAN. Toggle "Internet access" in phone Bluetooth settings. |
+| **USB Cable (Wired)** | `linksy on`<br>`phonenet-on` | Fast wired tethering | Reverse USB tethering via ADB + Gnirehtet VPN tunnel. |
+
+### Commands Table
 
 ### Direct Shortcuts
 | Command | Description |
 | :--- | :--- |
-| `phonenet-on` | Start reverse tethering immediately in background |
-| `phonenet-off` | Stop reverse tethering and disconnect tunnel |
-| `phonenet-status` | Check tethering state and phone connection |
-| `phonenet-doctor` | Run diagnostic troubleshooting checks |
+| `phonenet-on` | Start reverse tethering (pass `-w` for Wi-Fi, `-b` for Bluetooth) |
+| `phonenet-off` | Stop all active Linksy connections (USB, Wi-Fi hotspot, or Bluetooth) |
+| `phonenet-status` | Display status across USB, Wi-Fi hotspot, and Bluetooth PAN |
+| `phonenet-doctor` | Run diagnostic checks for ADB, Wi-Fi AP capability, and Bluetooth |
 
 ### Subcommands (`phonenet` or `linksy-phonenet`)
 | Command | Description |
 | :--- | :--- |
-| `phonenet on` / `linksy-phonenet on` | Start reverse tethering (pass `-f` for foreground) |
-| `phonenet off` / `linksy-phonenet off` | Stop reverse tethering |
-| `phonenet status` | Display Gnirehtet install, connected phone, and tethering state |
-| `phonenet doctor` | Run 4-step diagnostic checks with actionable fix suggestions |
-| `phonenet uninstall` | Clean up `~/.linksy/` binaries and temporary files |
+| `linksy on` | Start USB tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `--ssid <name>`, `--password <pass>`) |
+| `linksy off` | Stop all active tethering and hotspot services |
+| `linksy status` | Display status of USB, Wi-Fi hotspot, and Bluetooth sessions |
+| `linksy doctor` | Comprehensive diagnostic checks with copy-pasteable fix commands |
+| `linksy uninstall` | Clean up `~/.linksy/` binaries and temporary files |
 
-### Example Workflow
+### Example Workflows
 
+#### 1. Wirelessly via Wi-Fi Hotspot (High Speed, No Cable)
+```bash
+# Start concurrent Wi-Fi hotspot on the matching channel
+linksy on --wifi
+
+# On your phone: Open Wi-Fi settings, connect to "Linksy-Hotspot" (password: linksy12345)
+# Enjoy high-speed wireless internet shared from your laptop!
+
+# Disconnect when finished
+linksy off
+```
+
+#### 2. Wirelessly via Bluetooth (No Cable)
+```bash
+# Start Bluetooth reverse tethering
+linksy on --bluetooth
+
+# On your phone: Settings → Bluetooth → tap laptop → toggle ON "Internet access"
+# Disconnect when finished
+linksy off
+```
+
+#### 3. Over USB Cable (Wired)
 ```bash
 # 1. Plug in your Android phone via USB
 # 2. Turn on tethering
 phonenet-on
 
-# 3. Unlock phone and accept the VPN prompt on screen
-# Enjoy shared high-speed internet!
-
-# 4. Check connection status
-phonenet-status
-
-# 5. Turn off when finished
+# 3. Accept the VPN prompt on screen
+# Disconnect when finished
 phonenet-off
 ```
 
@@ -128,8 +156,8 @@ For verifying Linksy on real hardware:
 ## Roadmap (Out of Scope for v1)
 
 The following features are planned for future versions:
+- Concurrent Wi-Fi AP+STA & Bluetooth wireless reverse tethering (see [Wireless Reverse Tethering Research](docs/wireless-reverse-tethering-research.md))
 - macOS & Windows platform support
-- Fallback to Bluetooth reverse tethering
 - System tray / desktop GUI app
 - iOS reverse tethering support
 

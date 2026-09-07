@@ -3,6 +3,8 @@ import { spawn, execSync } from 'node:child_process';
 import chalk from 'chalk';
 import { GNIREHTET_BIN, PID_FILE, LOG_FILE } from '../lib/paths.js';
 import { checkDeviceStatus } from '../lib/adbHelpers.js';
+import { startWifiHotspot, isHotspotRunning } from '../lib/wifiHotspot.js';
+import { startBluetoothPan, isBluetoothPanRunning } from '../lib/bluetoothPan.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -15,7 +17,7 @@ export function isProcessRunning(pid) {
     process.kill(pid, 0);
     return true;
   } catch (e) {
-    return false;
+    return e.code === 'EPERM';
   }
 }
 
@@ -26,10 +28,22 @@ export async function onCommand(options = {}) {
     process.exit(1);
   }
 
+  // Handle wireless options
+  if (options.wifi) {
+    await startWifiHotspot(options);
+    return;
+  }
+
+  if (options.bluetooth) {
+    await startBluetoothPan(options);
+    return;
+  }
+
   // 2. Check if gnirehtet binary exists
   if (!fs.existsSync(GNIREHTET_BIN)) {
     logger.error('Gnirehtet binary not found.');
-    logger.info('Please run ' + chalk.bold.cyan('linksy setup') + ' first to install required components.');
+    logger.info('Please run ' + chalk.bold.cyan('linksy setup') + ' first to install required components,');
+    logger.info('or connect wirelessly using ' + chalk.bold.cyan('linksy on --wifi') + ' or ' + chalk.bold.cyan('linksy on --bluetooth') + '.');
     process.exit(1);
   }
 
@@ -38,7 +52,7 @@ export async function onCommand(options = {}) {
     const rawPid = fs.readFileSync(PID_FILE, 'utf8').trim();
     const pid = parseInt(rawPid, 10);
     if (!isNaN(pid) && isProcessRunning(pid)) {
-      logger.warn(`Linksy is already running (PID: ${pid}).`);
+      logger.warn(`Linksy USB tethering is already running (PID: ${pid}).`);
       logger.info(`Run ${chalk.bold.cyan('linksy off')} to stop it, or ${chalk.bold.cyan('linksy status')} for details.`);
       return;
     } else {
@@ -52,19 +66,22 @@ export async function onCommand(options = {}) {
   if (!deviceStatus.adbAvailable) {
     logger.error('adb is not installed or not working properly.');
     logger.info('Please run ' + chalk.bold.cyan('linksy setup') + ' or ' + chalk.bold.cyan('linksy doctor') + ' to fix this.');
+    logger.info('Alternatively, share internet wirelessly without adb using ' + chalk.bold.cyan('linksy on --wifi') + ' or ' + chalk.bold.cyan('linksy on --bluetooth') + '.');
     process.exit(1);
   }
 
   if (!deviceStatus.hasAnyDevice) {
-    logger.error('No phone detected.');
+    logger.error('No phone detected via USB cable.');
     console.log(
-      chalk.yellow('\nTo connect your phone:\n') +
-      '  1. Plug in your phone via USB cable.\n' +
-      '  2. Make sure USB debugging is enabled on your phone:\n' +
-      '     • Settings → About phone\n' +
-      '     • Tap "Build number" 7 times (to enable Developer Options)\n' +
-      '     • Settings → System (or Developer options) → Enable "USB debugging"\n' +
-      '  3. Reconnect the cable and run ' + chalk.cyan('linksy on') + ' again.\n'
+      chalk.yellow('\nChoose how you want to connect:\n') +
+      '  ' + chalk.bold.cyan('Option 1: Wirelessly via Wi-Fi (No Cable)\n') +
+      '     Run ' + chalk.bold.green('linksy on --wifi') + ' to share your laptop\'s Wi-Fi over a concurrent hotspot.\n\n' +
+      '  ' + chalk.bold.cyan('Option 2: Wirelessly via Bluetooth (No Cable)\n') +
+      '     Run ' + chalk.bold.green('linksy on --bluetooth') + ' to share internet via Bluetooth reverse tethering.\n\n' +
+      '  ' + chalk.bold.cyan('Option 3: Via USB Cable\n') +
+      '     1. Plug in your phone via USB cable.\n' +
+      '     2. Enable USB debugging in Developer Options.\n' +
+      '     3. Run ' + chalk.cyan('linksy on') + ' again.\n'
     );
     process.exit(1);
   }
