@@ -101,9 +101,13 @@ describe('wifiHotspot - generateHostapdConfig', () => {
 });
 
 describe('wifiHotspot - getWifiHotspotStatus', () => {
-  it('reports inactive status when not running', () => {
+  it('reports status object with running, pid, ssid, channel, and password properties', () => {
     const status = getWifiHotspotStatus();
     expect(status).toHaveProperty('running');
     expect(typeof status.running).toBe('boolean');
+    expect(status).toHaveProperty('pid');
+    expect(status).toHaveProperty('ssid');
+    expect(status).toHaveProperty('channel');
+    expect(status).toHaveProperty('password');
   });
 });

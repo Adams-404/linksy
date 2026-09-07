@@ -458,6 +458,7 @@ export function getWifiHotspotStatus() {
   let pid = null;
   let ssid = null;
   let channel = null;
+  let password = null;
 
   if (fs.existsSync(WIFI_PID_FILE)) {
     try {
@@ -470,10 +471,12 @@ export function getWifiHotspotStatus() {
       const conf = fs.readFileSync(WIFI_CONFIG_FILE, 'utf8');
       const ssidMatch = conf.match(/^ssid=(.*)$/m);
       const chMatch = conf.match(/^channel=(.*)$/m);
+      const passMatch = conf.match(/^wpa_passphrase=(.*)$/m);
       if (ssidMatch) ssid = ssidMatch[1];
       if (chMatch) channel = parseInt(chMatch[1], 10);
+      if (passMatch) password = passMatch[1];
     } catch {}
   }
 
-  return { running, pid, ssid, channel };
+  return { running, pid, ssid, channel, password };
 }

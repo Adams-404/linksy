@@ -40,7 +40,10 @@ export async function statusCommand() {
   // 3. Wi-Fi Hotspot status
   const wifiStatus = getWifiHotspotStatus();
   if (wifiStatus.running) {
-    console.log(chalk.green('✔') + ' Wi-Fi Hotspot:        ' + chalk.bold.green('ACTIVE') + chalk.dim(` (${wifiStatus.ssid || 'Hotspot'}, Ch ${wifiStatus.channel || '?'}, PID: ${wifiStatus.pid})`));
+    console.log(chalk.green('✔') + ' Wi-Fi Hotspot:        ' + chalk.bold.green('ACTIVE'));
+    console.log(chalk.dim('   • Network (SSID):   ') + chalk.bold.green(wifiStatus.ssid || 'Linksy-Hotspot'));
+    console.log(chalk.dim('   • Password:         ') + chalk.bold.yellow(wifiStatus.password || 'linksy12345'));
+    console.log(chalk.dim('   • Channel / Band:   ') + chalk.cyan(`Channel ${wifiStatus.channel || '?'}`) + chalk.dim(` (PID: ${wifiStatus.pid})`));
   } else {
     console.log(chalk.yellow('○') + ' Wi-Fi Hotspot:        ' + chalk.dim('Inactive (Run `linksy on --wifi` to start)'));
   }
