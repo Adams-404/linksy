@@ -2,7 +2,8 @@ import { describe, it, expect } from 'vitest';
 import {
   parseActiveWifiInfo,
   generateHostapdConfig,
-  getWifiHotspotStatus
+  getWifiHotspotStatus,
+  getDefaultHotspotSsid
 } from '../src/lib/wifiHotspot.js';
 
 describe('wifiHotspot - parseActiveWifiInfo', () => {
@@ -125,5 +126,20 @@ describe('wifiHotspot - getWifiHotspotStatus', () => {
     expect(status).toHaveProperty('ssid');
     expect(status).toHaveProperty('channel');
     expect(status).toHaveProperty('password');
+  });
+});
+
+describe('wifiHotspot - getDefaultHotspotSsid', () => {
+  it('returns a non-empty string starting with Linksy-', () => {
+    const ssid = getDefaultHotspotSsid();
+    expect(typeof ssid).toBe('string');
+    expect(ssid.startsWith('Linksy-')).toBe(true);
+    expect(ssid.length).toBeGreaterThan(7);
+    expect(ssid.length).toBeLessThanOrEqual(32);
+  });
+
+  it('contains valid SSID characters without spaces', () => {
+    const ssid = getDefaultHotspotSsid();
+    expect(ssid).toMatch(/^[a-zA-Z0-9_-]+$/);
   });
 });

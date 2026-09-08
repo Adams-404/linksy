@@ -3,7 +3,7 @@ import chalk from 'chalk';
 import { GNIREHTET_BIN, PID_FILE } from '../lib/paths.js';
 import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { isProcessRunning } from './on.js';
-import { getWifiHotspotStatus } from '../lib/wifiHotspot.js';
+import { getWifiHotspotStatus, getDefaultHotspotSsid } from '../lib/wifiHotspot.js';
 import { getBluetoothPanStatus } from '../lib/bluetoothPan.js';
 import { getConnectedDevices, getBlocklist } from '../lib/deviceManager.js';
 import { logger } from '../utils/logger.js';
@@ -42,7 +42,7 @@ export async function statusCommand() {
   const wifiStatus = getWifiHotspotStatus();
   if (wifiStatus.running) {
     console.log(chalk.green('✔') + ' Wi-Fi Hotspot:        ' + chalk.bold.green('ACTIVE'));
-    console.log(chalk.dim('   • Network (SSID):   ') + chalk.bold.green(wifiStatus.ssid || 'Linksy-Hotspot'));
+    console.log(chalk.dim('   • Network (SSID):   ') + chalk.bold.green(wifiStatus.ssid || getDefaultHotspotSsid()));
     if (wifiStatus.password) {
       console.log(chalk.dim('   • Password:         ') + chalk.bold.yellow(wifiStatus.password));
     } else {

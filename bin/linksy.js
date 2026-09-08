@@ -15,19 +15,22 @@ import {
   unwhitelistCommand,
   devicesCommand
 } from '../src/commands/block.js';
+import { nameCommand } from '../src/commands/name.js';
 
 const program = new Command();
 
 program
   .name('linksy-phonenet')
   .description('Reverse USB tethering CLI for Linux — share laptop Wi-Fi with Android without root')
-  .version('1.1.0')
+  .version('1.2.0')
   .option('--verbose', 'Show detailed error output and debug messages')
   .addHelpText('after', `
 Examples:
   $ linksy on --wifi                    # Share laptop Wi-Fi wirelessly to phone
   $ linksy on --wifi -p <password>      # Change hotspot password and connect
   $ linksy on --wifi --no-password      # Start open Wi-Fi network without password
+  $ linksy name                         # View current hotspot name (e.g. Linksy-ThinkPad)
+  $ linksy name "My-Hotspot"            # Change default hotspot name
   $ linksy devices                      # View connected devices (IP, MAC, signal)
   $ linksy block <device>               # Block a device from the Wi-Fi hotspot
   $ linksy unblock <device>             # Unblock a device
@@ -60,6 +63,7 @@ program
   .option('-w, --wifi', 'Share internet wirelessly via concurrent Wi-Fi AP+STA hotspot (no USB cable)')
   .option('-b, --bluetooth', 'Share internet wirelessly via Bluetooth reverse tethering (no USB cable)')
   .option('-s, --ssid <name>', 'Custom Wi-Fi hotspot SSID (saved as default)')
+  .option('-n, --name <name>', 'Custom Wi-Fi hotspot name (alias for --ssid, saved as default)')
   .option('-p, --password <pass>', 'Custom Wi-Fi hotspot password (saved as default)')
   .option('--no-password', 'Disable Wi-Fi password (create an open hotspot)')
   .option('--open', 'Alias for --no-password')
@@ -68,6 +72,7 @@ program
 Examples:
   $ linksy on                           # Start reverse tethering over USB cable
   $ linksy on --wifi                    # Start Wi-Fi hotspot (wireless, uses saved password)
+  $ linksy on --wifi --name "MyHotspot" # Set custom hotspot name and start
   $ linksy on --wifi -p <password>      # Change hotspot password and start
   $ linksy on --wifi -s "MyWifi" -p <password> # Change SSID & password and start
   $ linksy on --wifi --no-password      # Start open Wi-Fi hotspot with no password
@@ -102,6 +107,18 @@ program
       await statusCommand();
     } catch (err) {
       logger.error(`Failed to check status: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('name [new-name]')
+  .description('View or set your custom Wi-Fi hotspot name (SSID)')
+  .action(async (newName) => {
+    try {
+      await nameCommand(newName);
+    } catch (err) {
+      logger.error(`Failed to update hotspot name: ${err.message}`, err);
       process.exit(1);
     }
   });

@@ -70,9 +70,10 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 ### Subcommands (`phonenet` or `linksy-phonenet`)
 | Command | Description |
 | :--- | :--- |
-| `linksy on` | Start USB tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `--no-password`) |
+| `linksy on` | Start reverse tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-n` / `--name <name>`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `--no-password`) |
 | `linksy off` | Stop all active tethering and hotspot services |
 | `linksy status` | Display status of USB, Wi-Fi hotspot, connected devices, and Bluetooth sessions |
+| `linksy name [new-name]` | View or change your default Wi-Fi hotspot name (SSID) |
 | `linksy devices` | View connected devices with hostname, IP, MAC, signal strength, and transfer stats |
 | `linksy block <device>` | Disconnect and blacklist a device by hostname, IP, or MAC address |
 | `linksy unblock <device>` | Remove a device from the blacklist |
@@ -85,12 +86,19 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 #### 1. Wirelessly via Wi-Fi Hotspot (High Speed, No Cable)
 ```bash
 # Start concurrent Wi-Fi hotspot on the matching channel
+# Automatically uses your laptop model (e.g. "Linksy-ThinkPad-T490s") to prevent room collisions!
 linksy on --wifi
 
-# Or specify a custom network name and password (saved as your default):
-linksy on --wifi --ssid "MyNetwork" --password "<your-password>"
+# View your current hotspot name anytime:
+linksy name
+
+# Or set a permanent custom network name:
+linksy name "Adams-Hotspot"
+
+# Or specify a custom network name & password when starting:
+linksy on --wifi --name "Adams-Hotspot" --password "<your-password>"
 # Shorthand:
-linksy on -w -s "MyNetwork" -p "<your-password>"
+linksy on -w -n "Adams-Hotspot" -p "<your-password>"
 
 # Or run with NO password (open network):
 linksy on --wifi --no-password

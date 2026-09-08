@@ -19,7 +19,7 @@ any path a user might casually clean up. This was a deliberate fix from
 early manual testing where a Downloads-based install caused confusion.
 
 ## Command naming
-Commands are `linksy setup|on|off|status|devices|block|unblock|whitelist|doctor|uninstall`. Keep these
+Commands are `linksy setup|on|off|status|name|devices|block|unblock|whitelist|doctor|uninstall`. Keep these
 short — the whole point of this tool is reducing multi-step manual
 commands to one word.
 

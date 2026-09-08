@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import { execSync, spawnSync } from 'node:child_process';
 import chalk from 'chalk';
 import {
@@ -16,6 +17,83 @@ import {
 import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
 import { logger } from '../utils/logger.js';
+
+/**
+ * Detects the laptop model or host to build a unique, human-friendly default SSID (e.g. Linksy-ThinkPad-T490s).
+ * Capped to standard 802.11 32-byte SSID limit.
+ * @returns {string}
+ */
+export function getDefaultHotspotSsid() {
+  const dmiPaths = [
+    '/sys/devices/virtual/dmi/id/product_family',
+    '/sys/devices/virtual/dmi/id/product_version',
+    '/sys/devices/virtual/dmi/id/product_name'
+  ];
+
+  let rawModel = '';
+  for (const p of dmiPaths) {
+    try {
+      if (fs.existsSync(p)) {
+        const val = fs.readFileSync(p, 'utf8').trim();
+        if (
+          val &&
+          !/^(to be filled|system product|default string|none|all series|o\.e\.m|type1product)/i.test(val) &&
+          !/^[0-9a-zA-Z]{10,}$/.test(val)
+        ) {
+          rawModel = val;
+          break;
+        }
+      }
+    } catch {}
+  }
+
+  if (!rawModel) {
+    try {
+      const pName = '/sys/devices/virtual/dmi/id/product_name';
+      if (fs.existsSync(pName)) {
+        const val = fs.readFileSync(pName, 'utf8').trim();
+        if (val && !/^(to be filled|system product|default string|none)/i.test(val)) {
+          rawModel = val;
+        }
+      }
+    } catch {}
+  }
+
+  const user = process.env.USER || '';
+
+  if (!rawModel) {
+    try {
+      const h = os.hostname();
+      if (h && h !== 'localhost' && !h.startsWith('localhost.')) {
+        rawModel = h;
+      }
+    } catch {}
+  }
+
+  if (rawModel) {
+    const isGenericDistro = /^(fedora|ubuntu|arch|debian|linux|manjaro|opensuse|gentoo)$/i.test(rawModel);
+    let identifier = rawModel;
+    if (isGenericDistro && user && user !== 'root') {
+      identifier = `${user}-${rawModel}`;
+    }
+    const cleaned = identifier
+      .replace(/[^a-zA-Z0-9_-]/g, '-')
+      .replace(/-+/g, '-')
+      .replace(/^-|-$/g, '');
+    if (cleaned) {
+      return `Linksy-${cleaned}`.slice(0, 32);
+    }
+  }
+
+  if (user && user !== 'root') {
+    const cleanedUser = user.replace(/[^a-zA-Z0-9_-]/g, '');
+    if (cleanedUser) {
+      return `Linksy-${cleanedUser}`.slice(0, 32);
+    }
+  }
+
+  return 'Linksy-Hotspot';
+}
 
 /**
  * Parses raw iw link and info text to extract active Wi-Fi connection parameters.
@@ -150,7 +228,7 @@ export function getAdminGroup() {
  */
 export function generateHostapdConfig({
   apIface = 'ap0',
-  ssid = 'Linksy-Hotspot',
+  ssid = null,
   password = 'linksy12345',
   channel = 157,
   hwMode = 'a',
@@ -162,10 +240,11 @@ export function generateHostapdConfig({
   whitelistMode = false
 }) {
   const code = countryCode || getRegulatoryCountry();
+  const finalSsid = ssid || getDefaultHotspotSsid();
   const lines = [
     `interface=${apIface}`,
     'driver=nl80211',
-    `ssid=${ssid}`,
+    `ssid=${finalSsid}`,
     `hw_mode=${hwMode}`,
     `channel=${channel}`,
     'ieee80211n=1',
@@ -313,9 +392,11 @@ export async function startWifiHotspot(options = {}) {
     options.password === '' ||
     (typeof options.password === 'string' && ['none', 'open', 'false', 'no'].includes(options.password.toLowerCase()));
 
+  const wantsCustomSsid = options.ssid !== undefined || options.name !== undefined;
+  const requestedSsid = options.name || options.ssid;
   const hasCredentialChange =
     options.password !== undefined ||
-    options.ssid !== undefined ||
+    wantsCustomSsid ||
     options.noPassword !== undefined ||
     options.open !== undefined;
 
@@ -333,7 +414,8 @@ export async function startWifiHotspot(options = {}) {
 
   const saved = getSavedConfig();
   const apIface = options.apIface || 'ap0';
-  const ssid = options.ssid || saved.wifiSsid || 'Linksy-Hotspot';
+  const defaultSsid = getDefaultHotspotSsid();
+  const ssid = requestedSsid || (saved.wifiSsid && saved.wifiSsid !== 'Linksy-Hotspot' ? saved.wifiSsid : defaultSsid);
 
   let password;
   if (wantsOpen) {
@@ -357,10 +439,13 @@ export async function startWifiHotspot(options = {}) {
   }
 
   if (hasCredentialChange) {
-    saveConfig({
-      wifiSsid: ssid,
+    const configUpdates = {
       wifiPassword: password || 'none'
-    });
+    };
+    if (wantsCustomSsid) {
+      configUpdates.wifiSsid = ssid;
+    }
+    saveConfig(configUpdates);
   }
 
   if (!ensureWifiDependencies()) {
