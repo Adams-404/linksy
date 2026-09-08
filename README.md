@@ -173,8 +173,25 @@ Linksy doctor checks:
 2. Is the `gnirehtet` binary present and executable in `~/.linksy/`?
 3. Is a physical Android phone detected via USB?
 4. Is USB debugging authorized (i.e. RSA key accepted on the phone screen)?
+5. Is Wi-Fi AP+STA concurrent mode supported by your Wi-Fi card?
+6. Is Bluetooth PAN available for wireless fallback?
+7. Is your Linksy CLI up-to-date with the latest release on NPM?
 
 For any failed step, `doctor` provides an immediate, copy-pasteable fix.
+
+---
+
+## Updating Linksy (`linksy update`)
+
+Linksy automatically checks for updates in the background without adding any latency to your commands. If a new release is available, a non-intrusive alert box is shown at the end of command runs.
+
+To update Linksy to the latest version at any time:
+
+```bash
+linksy update
+```
+
+Linksy will check NPM, download and upgrade the global package, and verify the installation automatically.
 
 ---
 
@@ -186,7 +203,7 @@ For verifying Linksy on real hardware:
 - [ ] **USB Debugging**: On your phone, go to **Settings** → **About phone** → tap **Build number** 7 times. Go to **Developer options** → toggle **USB debugging** ON.
 - [ ] **Plug In**: Connect phone to laptop via USB.
 - [ ] **Verify Device**: Run `adb devices`. You should see `<serial>  device` or `<serial>  unauthorized`.
-- [ ] **Run Doctor**: Run `linksy doctor` to confirm all 4 checks pass.
+- [ ] **Run Doctor**: Run `linksy doctor` to confirm all checks pass.
 - [ ] **Start Tethering**: Run `linksy on`.
 - [ ] **Authorize on Phone**: Tap **OK** on the "Connection request" (Gnirehtet VPN prompt) on your phone.
 - [ ] **Test Connectivity**: Turn off Cellular Data and Wi-Fi on your phone. Open a browser on the phone and verify internet access works!
@@ -196,12 +213,14 @@ For verifying Linksy on real hardware:
 
 ## Roadmap
 
-### Completed in v1.1.0 ✔
+### Completed Features ✔
 - [x] Concurrent Wi-Fi AP+STA wireless reverse tethering (see [Wireless Reverse Tethering Research](docs/wireless-reverse-tethering-research.md))
 - [x] Bluetooth PAN wireless reverse tethering (`linksy on --bluetooth`)
 - [x] Real-time connected device monitoring (`linksy devices`)
 - [x] Hotspot access control (blacklist / whitelist with `linksy block` & `linksy unblock`)
 - [x] Pre-emptive NetworkManager radio collision prevention (zero upstream Wi-Fi drops)
+- [x] Smart DMI hardware-based hotspot SSID naming & custom names (`linksy name`)
+- [x] Automatic non-blocking update notifications & one-word update command (`linksy update`)
 
 ### Planned for Future Versions
 - [ ] macOS & Windows platform support
