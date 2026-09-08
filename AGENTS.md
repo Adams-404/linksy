@@ -19,7 +19,7 @@ any path a user might casually clean up. This was a deliberate fix from
 early manual testing where a Downloads-based install caused confusion.
 
 ## Command naming
-Commands are `linksy setup|on|off|status|doctor|uninstall`. Keep these
+Commands are `linksy setup|on|off|status|devices|block|unblock|whitelist|doctor|uninstall`. Keep these
 short — the whole point of this tool is reducing multi-step manual
 commands to one word.
 
@@ -27,8 +27,7 @@ commands to one word.
 - Plain, friendly terminal output (this tool is aimed at non-expert Linux
   users), not terse Unix-tool style. Every error should suggest a fix, not
   just state the failure.
-- Distro support for v1: Fedora (dnf), Ubuntu/Debian (apt), Arch (pacman)
-  only. Don't silently assume apt on unknown systems.
+- Distro support: Fedora (dnf), Ubuntu/Debian (apt), Arch (pacman), openSUSE (zypper). Don't silently assume apt on unknown systems.
 
 ## Do not build yet (see README roadmap)
-macOS/Windows support, Bluetooth fallback, GUI app, iOS support.
+macOS/Windows support, GUI app, iOS support.

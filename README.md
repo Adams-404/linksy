@@ -1,17 +1,23 @@
 # Linksy PhoneNet 📱⚡
 
-> **Effortless reverse USB tethering for Linux.**  
-> Share your laptop's Wi-Fi internet connection to your Android phone over a USB cable — no root required.
+> **Effortless reverse tethering for Linux.**  
+> Share your laptop's Wi-Fi internet connection to your Android phone wirelessly or over a USB cable.
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js](https://img.shields.io/badge/node-%3E%3D18-brightgreen.svg)](https://nodejs.org)
 [![Platform](https://img.shields.io/badge/platform-Linux-blue.svg)](https://kernel.org)
+[![NPM Version](https://img.shields.io/npm/v/linksy-phonenet.svg)](https://www.npmjs.com/package/linksy-phonenet)
 
 ---
 
 ## The Problem & The Solution
 
-Most laptop Wi-Fi cards (particularly Intel `iwlwifi` and similar single-radio chips) cannot run in Access Point (AP / hotspot) mode while remaining connected to a Wi-Fi network. In practice, attempting to activate an `nmcli` or GUI hotspot drops the laptop's existing wireless connection. The reliable wireless-radio-free solution is **reverse USB tethering**: your laptop stays connected to Wi-Fi, and shares that connection with your Android device over a standard USB cable using a VPN-style bridge. **Linksy PhoneNet** wraps `adb` and `gnirehtet` into a friendly, single-command CLI experience that handles dependency installation, binary resolution, phone detection, and daemon management with zero manual file hunting.
+Most laptop Wi-Fi cards cannot run in standard hotspot mode while connected to a Wi-Fi network. In practice, activating an `nmcli` or GUI hotspot drops the laptop's existing wireless connection.
+
+**Linksy PhoneNet** solves this by providing three simple, automated reverse tethering methods:
+1. **Wireless Concurrent Wi-Fi Hotspot (`linksy on --wifi`)**: On dual-interface-capable Wi-Fi cards, Linksy automatically clones your upstream Wi-Fi frequency and channel into an independent virtual Access Point (`ap0`) with zero connection drops, automatic DHCP, and real-time device management.
+2. **Wireless Bluetooth Reverse Tethering (`linksy on --bluetooth`)**: Broadcasts a Bluetooth PAN Network Access Point (NAP) bridge that provides wireless reverse tethering without radio conflicts.
+3. **Wired Reverse USB Tethering (`linksy on`)**: Wraps `adb` and `gnirehtet` into a friendly, single-command experience that tunnels internet traffic through a USB cable without root.
 
 ---
 
@@ -179,13 +185,19 @@ For verifying Linksy on real hardware:
 
 ---
 
-## Roadmap (Out of Scope for v1)
+## Roadmap
 
-The following features are planned for future versions:
-- Concurrent Wi-Fi AP+STA & Bluetooth wireless reverse tethering (see [Wireless Reverse Tethering Research](docs/wireless-reverse-tethering-research.md))
-- macOS & Windows platform support
-- System tray / desktop GUI app
-- iOS reverse tethering support
+### Completed in v1.1.0 ✔
+- [x] Concurrent Wi-Fi AP+STA wireless reverse tethering (see [Wireless Reverse Tethering Research](docs/wireless-reverse-tethering-research.md))
+- [x] Bluetooth PAN wireless reverse tethering (`linksy on --bluetooth`)
+- [x] Real-time connected device monitoring (`linksy devices`)
+- [x] Hotspot access control (blacklist / whitelist with `linksy block` & `linksy unblock`)
+- [x] Pre-emptive NetworkManager radio collision prevention (zero upstream Wi-Fi drops)
+
+### Planned for Future Versions
+- [ ] macOS & Windows platform support
+- [ ] System tray / desktop GUI app
+- [ ] iOS reverse tethering support
 
 ---
 
