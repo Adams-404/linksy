@@ -161,14 +161,22 @@ ip link set "$BRIDGE" up
 # 3. Register BlueZ NetworkServer NAP service
 busctl call org.bluez /org/bluez/hci0 org.bluez.NetworkServer1 Register ss "nap" "$BRIDGE" 2>/dev/null || true
 
-# 4. Enable IP forwarding and NAT
+# 4. Enable IP forwarding and firewall/NAT
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+# If firewalld is active, assign bridge interface to trusted zone
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --add-interface="$BRIDGE" 2>/dev/null || true
+fi
+
+# Insert explicit iptables rules for DHCP, DNS and NAT
+iptables -I INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-iptables -C FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || \\
-  iptables -A FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT
-iptables -C FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || \\
-  iptables -A FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # 5. Start dnsmasq DHCP server for Bluetooth subnet
 dnsmasq --conf-file=/dev/null --no-hosts --bind-interfaces \\
@@ -176,6 +184,7 @@ dnsmasq --conf-file=/dev/null --no-hosts --bind-interfaces \\
   --dhcp-range=10.42.0.10,10.42.0.100,255.255.255.0,12h \\
   --dhcp-option=3,10.42.0.1 \\
   --dhcp-option=6,1.1.1.1,8.8.8.8 \\
+  --log-dhcp \\
   --pid-file="$PID_FILE" >> "$LOG_FILE" 2>&1
 `;
 
@@ -191,9 +200,17 @@ fi
 
 busctl call org.bluez /org/bluez/hci0 org.bluez.NetworkServer1 Unregister s "nap" 2>/dev/null || true
 
-iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+# Remove from firewalld trusted zone if present
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --remove-interface="$BRIDGE" 2>/dev/null || true
+fi
+
+iptables -D INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 ip link set "$BRIDGE" down 2>/dev/null || true
 ip link delete "$BRIDGE" type bridge 2>/dev/null || true

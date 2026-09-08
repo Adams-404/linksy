@@ -16,6 +16,15 @@ program
   .description('Reverse USB tethering CLI for Linux — share laptop Wi-Fi with Android without root')
   .version('1.0.1')
   .option('--verbose', 'Show detailed error output and debug messages')
+  .addHelpText('after', `
+Examples:
+  $ linksy on --wifi                    # Share laptop Wi-Fi wirelessly to phone
+  $ linksy on --wifi -p <password>      # Change hotspot password and connect
+  $ linksy on --wifi --no-password      # Start open Wi-Fi network without password
+  $ linksy on                           # Reverse tether over USB cable
+  $ linksy status                       # Check active connection, SSID & password
+  $ linksy off                          # Disconnect all active sessions
+`)
   .hook('preAction', (thisCommand) => {
     const opts = thisCommand.opts();
     if (opts.verbose) {
@@ -45,6 +54,15 @@ program
   .option('--no-password', 'Disable Wi-Fi password (create an open hotspot)')
   .option('--open', 'Alias for --no-password')
   .option('-f, --foreground', 'Run Gnirehtet in foreground instead of detached background')
+  .addHelpText('after', `
+Examples:
+  $ linksy on                           # Start reverse tethering over USB cable
+  $ linksy on --wifi                    # Start Wi-Fi hotspot (wireless, uses saved password)
+  $ linksy on --wifi -p <password>      # Change hotspot password and start
+  $ linksy on --wifi -s "MyWifi" -p <password> # Change SSID & password and start
+  $ linksy on --wifi --no-password      # Start open Wi-Fi hotspot with no password
+  $ linksy on --bluetooth               # Start Bluetooth reverse tethering
+`)
   .action(async (options) => {
     try {
       await onCommand(options);

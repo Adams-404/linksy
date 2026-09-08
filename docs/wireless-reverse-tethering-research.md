@@ -234,3 +234,39 @@ linksy doctor          # Comprehensive diagnostic for USB, Wi-Fi AP capability, 
 1. **Wi-Fi AP Prototype**: Create a lightweight runner script that checks the active Wi-Fi channel on `wlp0s20f3`, provisions `ap0`, and runs `hostapd` + `dnsmasq`.
 2. **Bluetooth PAN Prototype**: Test BlueZ NAP bridge registration and Android connection pairing.
 3. **CLI Integration**: Expose these capabilities through the Linksy CLI command suite.
+
+---
+
+## 8. Firewall & Ingress Routing (The Fedora / firewalld DHCP Drop)
+
+### 8.1 Symptom
+When a client (e.g. Android phone) attempts to connect to `Linksy-Hotspot`, the system logs show:
+```text
+hostapd: ap0: STA xx:xx:xx:xx:xx:xx IEEE 802.11: authenticated
+hostapd: ap0: STA xx:xx:xx:xx:xx:xx IEEE 802.11: associated
+hostapd: ap0: STA xx:xx:xx:xx:xx:xx WPA: pairwise key handshake completed (RSN)
+```
+The Layer 2 Wi-Fi connection and WPA2 handshake succeed completely. However, on the client screen, the phone remains stuck on **"Obtaining IP address..."** and eventually times out.
+
+### 8.2 Root Cause
+Modern Linux distributions like Fedora and RHEL enforce host firewalls using `firewalld` (or `ufw` on Ubuntu).
+1. When a new virtual interface (`ap0` or `pan0`) is created, it has no zone assignment and defaults to the system's default zone (e.g. `FedoraWorkstation`).
+2. The default zone permits only outbound client services (e.g. SSH, DHCPv6 client, Samba). Inbound UDP port 67 (DHCP server requests from clients) and UDP port 53 (DNS) are rejected with `icmp-host-prohibited`.
+3. Furthermore, standard `iptables -A FORWARD` appends rules *after* the firewall's rejection chains.
+
+### 8.3 The Resolution
+Linksy handles this automatically by:
+1. Assigning virtual interfaces (`ap0`, `pan0`) to `firewalld`'s `trusted` zone in memory:
+   ```bash
+   firewall-cmd --zone=trusted --add-interface=ap0
+   ```
+2. Inserting explicit top-priority rules in the `iptables` `INPUT` and `FORWARD` chains:
+   ```bash
+   iptables -I INPUT -i ap0 -p udp --dport 67:68 --sport 67:68 -j ACCEPT
+   iptables -I INPUT -i ap0 -p udp --dport 53 -j ACCEPT
+   iptables -I INPUT -i ap0 -p tcp --dport 53 -j ACCEPT
+   iptables -I FORWARD -i ap0 -o <upstream-iface> -j ACCEPT
+   iptables -I FORWARD -i <upstream-iface> -o ap0 -m state --state RELATED,ESTABLISHED -j ACCEPT
+   ```
+3. Enabling `--log-dhcp` on `dnsmasq` to provide immediate logging of DHCP transactions.
+4. Cleanly removing interfaces from `trusted` and pruning rules upon `linksy off`.

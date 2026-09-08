@@ -384,14 +384,22 @@ ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 ip addr add 192.168.42.1/24 dev "$AP_IFACE"
 ip link set "$AP_IFACE" up 2>/dev/null || true
 
-# 5. Enable IP forwarding and NAT masquerading
+# 5. Enable IP forwarding and firewall/NAT rules
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+# If firewalld is active, assign AP interface to trusted zone so DHCP, DNS, and traffic forwarding are permitted
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --add-interface="$AP_IFACE" 2>/dev/null || true
+fi
+
+# Insert explicit iptables rules for DHCP, DNS, and NAT routing
+iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || true
 iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-iptables -C FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || \\
-  iptables -A FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT
-iptables -C FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || \\
-  iptables -A FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT
 
 # 6. Start hostapd in daemon mode with PID file
 hostapd -B -P "$PID_FILE" "$CONF" >> "$LOG_FILE" 2>&1
@@ -407,6 +415,7 @@ dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
   --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
   --dhcp-option=3,192.168.42.1 \\
   --dhcp-option=6,1.1.1.1,8.8.8.8 \\
+  --log-dhcp \\
   --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
 `;
 
@@ -427,9 +436,17 @@ fi
 
 killall hostapd 2>/dev/null || true
 
-iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+# Remove from firewalld trusted zone if present
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --remove-interface="$AP_IFACE" 2>/dev/null || true
+fi
+
+iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || true
+iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
 iw dev "$AP_IFACE" del 2>/dev/null || true
