@@ -5,6 +5,7 @@ import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { isProcessRunning } from './on.js';
 import { getWifiHotspotStatus } from '../lib/wifiHotspot.js';
 import { getBluetoothPanStatus } from '../lib/bluetoothPan.js';
+import { getConnectedDevices, getBlocklist } from '../lib/deviceManager.js';
 import { logger } from '../utils/logger.js';
 
 export async function statusCommand() {
@@ -48,8 +49,35 @@ export async function statusCommand() {
       console.log(chalk.dim('   • Password:         ') + chalk.bold.magenta('None (Open Network)'));
     }
     console.log(chalk.dim('   • Channel / Band:   ') + chalk.cyan(`Channel ${wifiStatus.channel || '?'}`) + chalk.dim(` (PID: ${wifiStatus.pid})`));
+
+    const devices = getConnectedDevices('ap0');
+    if (devices.length > 0) {
+      console.log(chalk.dim(`   • Connected Devices (${devices.length}):`));
+      for (const dev of devices) {
+        const signalStr = dev.signal ? ` [${dev.signal} dBm]` : '';
+        const ipStr = dev.ip !== 'Assigning IP...' ? dev.ip : 'Acquiring IP...';
+        console.log(
+          chalk.dim('     - ') +
+          chalk.bold.cyan(dev.hostname) +
+          chalk.dim(` (${ipStr})`) +
+          chalk.dim(` [MAC: ${dev.mac}]`) +
+          chalk.green(signalStr)
+        );
+      }
+    } else {
+      console.log(chalk.dim('   • Connected Devices: ') + chalk.dim('None (Waiting for devices to connect)'));
+    }
+
+    const blocked = getBlocklist();
+    if (blocked.length > 0) {
+      console.log(chalk.dim(`   • Blocked Devices (${blocked.length}): `) + chalk.red(blocked.join(', ')));
+    }
   } else {
     console.log(chalk.yellow('○') + ' Wi-Fi Hotspot:        ' + chalk.dim('Inactive (Run `linksy on --wifi` to start)'));
+    const blocked = getBlocklist();
+    if (blocked.length > 0) {
+      console.log(chalk.dim(`   • Blocked Devices (${blocked.length}): `) + chalk.red(blocked.join(', ')));
+    }
   }
 
   // 4. Bluetooth PAN status

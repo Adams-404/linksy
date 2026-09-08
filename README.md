@@ -64,9 +64,13 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 ### Subcommands (`phonenet` or `linksy-phonenet`)
 | Command | Description |
 | :--- | :--- |
-| `linksy on` | Start USB tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `--ssid <name>`, `--password <pass>`) |
+| `linksy on` | Start USB tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `--no-password`) |
 | `linksy off` | Stop all active tethering and hotspot services |
-| `linksy status` | Display status of USB, Wi-Fi hotspot, and Bluetooth sessions |
+| `linksy status` | Display status of USB, Wi-Fi hotspot, connected devices, and Bluetooth sessions |
+| `linksy devices` | View connected devices with hostname, IP, MAC, signal strength, and transfer stats |
+| `linksy block <device>` | Disconnect and blacklist a device by hostname, IP, or MAC address |
+| `linksy unblock <device>` | Remove a device from the blacklist |
+| `linksy whitelist <device>` | Whitelist a device (pass `--remove` to unwhitelist) |
 | `linksy doctor` | Comprehensive diagnostic checks with copy-pasteable fix commands |
 | `linksy uninstall` | Clean up `~/.linksy/` binaries and temporary files |
 
@@ -88,10 +92,21 @@ linksy on --wifi --no-password
 # On your phone: Open Wi-Fi settings, connect to your network
 # Enjoy high-speed wireless internet shared from your laptop!
 
+# See who is connected to your hotspot (device name, IP, signal, data usage):
+linksy devices
+
 # Check connection status & password anytime:
 linksy status
 
-# Disconnect when finished
+# Block an unwanted device (by name, IP, or MAC):
+linksy block 192.168.42.29
+# or by MAC:
+linksy block aa:bb:cc:dd:ee:ff
+
+# Unblock a device:
+linksy unblock aa:bb:cc:dd:ee:ff
+
+# Disconnect when finished:
 linksy off
 ```
 

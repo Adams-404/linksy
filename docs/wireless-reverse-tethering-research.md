@@ -270,3 +270,54 @@ Linksy handles this automatically by:
    ```
 3. Enabling `--log-dhcp` on `dnsmasq` to provide immediate logging of DHCP transactions.
 4. Cleanly removing interfaces from `trusted` and pruning rules upon `linksy off`.
+
+---
+
+## 9. Device Visibility & Access Control Architecture
+
+### 9.1 Real-Time Connected Device Discovery
+To provide immediate visibility into who is connected to `Linksy-Hotspot`, Linksy combines three system sources:
+1. **Layer 2 Metrics (`iw dev ap0 station dump`)**:
+   - Queries the Linux wireless subsystem (`nl80211`) for active associated MAC addresses.
+   - Extracts real-time signal strength (dBm), transmission bitrates (MCS), byte counters (RX/TX), and connection duration.
+2. **Layer 3 DHCP Leases (`dnsmasq.leases`)**:
+   - `dnsmasq` persists client hostname and IP bindings (e.g. `de:99:a9:f4:57:d6 192.168.42.29 S26-Ultra`).
+   - Cross-referenced with active station MACs to map human-readable device names and leased IPs.
+3. **ARP Table Fallback (`/proc/net/arp`)**:
+   - Acts as a fallback for devices with static IPs or before lease persistence completes.
+
+Exposed via `linksy devices` and `linksy status`.
+
+### 9.2 Device Access Control (Blacklisting & Whitelisting)
+Linksy implements a two-tier defense mechanism:
+- **Layer 2 (`hostapd` ACL & Deauthentication)**:
+  - `hostapd` is started with `ctrl_interface=/run/hostapd` and `deny_mac_file=~/.linksy/wifi/hostapd.deny` (or `accept_mac_file`).
+  - When a user runs `linksy block <device>`, Linksy resolves the hostname or IP to a MAC address, appends it to `hostapd.deny`, and issues live `disassociate` and `deauthenticate` commands via `hostapd_cli`.
+- **Layer 3 (Kernel Firewall Drop)**:
+  - Inserts immediate `iptables -I INPUT/FORWARD -i ap0 -m mac --mac-source <MAC> -j DROP` rules to prevent any queued or spoofed packets from reaching the laptop or upstream gateway.
+
+---
+
+## 10. Startup NetworkManager Race Condition & Resolution
+
+### 10.1 Symptom
+When starting the Wi-Fi hotspot (`linksy on --wifi`), the laptop's upstream Wi-Fi connection temporarily disconnected for a few moments before reconnecting.
+
+### 10.2 Root Cause Analysis
+1. When `iw dev <iface> interface add ap0 type __ap` created the virtual interface, NetworkManager's `udev` device monitor detected `ap0` before `nmcli device set ap0 managed no` could execute.
+2. NetworkManager signaled `wpa_supplicant` to manage `ap0`.
+3. Because both `ap0` and the upstream interface (e.g. `wlp0s20f3`) share the single physical radio (`wiphy0`), `wpa_supplicant` attempted to reinitialize driver state on `wiphy0` (`Could not set interface ap0 flags (UP): Device or resource busy`).
+4. This driver collision disrupted the active 4-way group key handshake with the upstream Wi-Fi access point, causing `wlp0s20f3` to log `CTRL-EVENT-DISCONNECTED reason=16`.
+5. Once NetworkManager completed its reconnect sequence, `ap0` was marked unmanaged and the connection remained stable.
+
+### 10.3 Pre-emptive Resolution
+Linksy prevents this race condition entirely by pre-configuring NetworkManager *before* the virtual interface is created:
+1. Linksy writes an unmanaged rule into `/run/NetworkManager/conf.d/99-linksy.conf`:
+   ```ini
+   [keyfile]
+   unmanaged-devices=interface-name:ap0;interface-name:pan0
+   ```
+2. Linksy triggers `nmcli general reload conf`.
+3. NetworkManager's udev handler immediately ignores `ap0` and `pan0` upon creation. `wpa_supplicant` is never asked to touch the virtual interface, eliminating the radio reinitialization and preserving the upstream Wi-Fi connection with zero drops.
+4. On `linksy off`, the transient configuration in `/run` is deleted and reloaded.
+

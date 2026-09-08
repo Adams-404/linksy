@@ -7,7 +7,11 @@ import {
   WIFI_DIR,
   WIFI_PID_FILE,
   WIFI_LOG_FILE,
-  WIFI_CONFIG_FILE
+  WIFI_CONFIG_FILE,
+  WIFI_LEASES_FILE,
+  WIFI_DENY_FILE,
+  WIFI_ACCEPT_FILE,
+  HOSTAPD_CTRL_DIR
 } from './paths.js';
 import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
@@ -136,7 +140,11 @@ export function generateHostapdConfig({
   password = 'linksy12345',
   channel = 157,
   hwMode = 'a',
-  countryCode = null
+  countryCode = null,
+  ctrlInterface = HOSTAPD_CTRL_DIR,
+  denyMacFile = WIFI_DENY_FILE,
+  acceptMacFile = WIFI_ACCEPT_FILE,
+  whitelistMode = false
 }) {
   const code = countryCode || getRegulatoryCountry();
   const lines = [
@@ -148,6 +156,16 @@ export function generateHostapdConfig({
     'ieee80211n=1',
     'wmm_enabled=1'
   ];
+
+  if (ctrlInterface) {
+    lines.push(`ctrl_interface=${ctrlInterface}`);
+  }
+
+  if (whitelistMode && acceptMacFile && fs.existsSync(acceptMacFile)) {
+    lines.push('macaddr_acl=1', `accept_mac_file=${acceptMacFile}`);
+  } else if (denyMacFile && fs.existsSync(denyMacFile)) {
+    lines.push('macaddr_acl=0', `deny_mac_file=${denyMacFile}`);
+  }
 
   if (code) {
     lines.push(`country_code=${code}`, 'ieee80211d=1');
@@ -341,9 +359,16 @@ export async function startWifiHotspot(options = {}) {
 
   logger.info(`Detected active Wi-Fi: ${chalk.green(activeWifi.ssid || 'connected')} on ${chalk.cyan(activeWifi.iface)}`);
   logger.info(`Frequency: ${chalk.yellow(activeWifi.freq ? `${activeWifi.freq} MHz` : '')} (Channel ${chalk.yellow(activeWifi.channel)}, ${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'})`);
-
   if (!fs.existsSync(WIFI_DIR)) {
     fs.mkdirSync(WIFI_DIR, { recursive: true });
+  }
+
+  // Write deny and accept files if configured
+  if (Array.isArray(saved.blacklist) && saved.blacklist.length > 0) {
+    try { fs.writeFileSync(WIFI_DENY_FILE, saved.blacklist.join('\n') + '\n', 'utf8'); } catch {}
+  }
+  if (Array.isArray(saved.whitelist) && saved.whitelist.length > 0) {
+    try { fs.writeFileSync(WIFI_ACCEPT_FILE, saved.whitelist.join('\n') + '\n', 'utf8'); } catch {}
   }
 
   const configContent = generateHostapdConfig({
@@ -351,7 +376,8 @@ export async function startWifiHotspot(options = {}) {
     ssid,
     password,
     channel: activeWifi.channel,
-    hwMode: activeWifi.hwMode
+    hwMode: activeWifi.hwMode,
+    whitelistMode: saved.whitelistMode === true
   });
 
   fs.writeFileSync(WIFI_CONFIG_FILE, configContent, 'utf8');
@@ -366,9 +392,20 @@ AP_IFACE="${apIface}"
 CONF="${WIFI_CONFIG_FILE}"
 PID_FILE="${WIFI_PID_FILE}"
 LOG_FILE="${WIFI_LOG_FILE}"
+LEASES_FILE="${WIFI_LEASES_FILE}"
+DENY_FILE="${WIFI_DENY_FILE}"
 
 # Clear previous log
 : > "$LOG_FILE"
+
+# 0. Pre-emptively tell NetworkManager to ignore ap0 before interface creation
+mkdir -p /run/NetworkManager/conf.d
+cat << 'NMEOF' > /run/NetworkManager/conf.d/99-linksy.conf
+[keyfile]
+unmanaged-devices=interface-name:ap0;interface-name:pan0
+NMEOF
+nmcli general reload conf 2>/dev/null || true
+mkdir -p /run/hostapd
 
 # 1. Clean up stale ap interface if existing
 iw dev "$AP_IFACE" del 2>/dev/null || true
@@ -392,12 +429,23 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/de
   firewall-cmd --zone=trusted --add-interface="$AP_IFACE" 2>/dev/null || true
 fi
 
+# Apply any blacklist drop rules
+if [ -f "$DENY_FILE" ]; then
+  while read -r mac; do
+    mac=$(echo "$mac" | tr -d '\r\n ')
+    if [ -n "$mac" ]; then
+      iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+      iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    fi
+  done < "$DENY_FILE"
+fi
+
 # Insert explicit iptables rules for DHCP, DNS, and NAT routing
 iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || true
+iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
@@ -409,12 +457,13 @@ sleep 1
 ip link set "$AP_IFACE" up 2>/dev/null || true
 ip addr add 192.168.42.1/24 dev "$AP_IFACE" 2>/dev/null || true
 
-# 7. Start dnsmasq with dynamic binding on the active AP interface
+# 7. Start dnsmasq with dynamic binding and designated leases file
 dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
   --interface="$AP_IFACE" \\
   --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
   --dhcp-option=3,192.168.42.1 \\
   --dhcp-option=6,1.1.1.1,8.8.8.8 \\
+  --dhcp-leasefile="$LEASES_FILE" \\
   --log-dhcp \\
   --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
 `;
@@ -423,6 +472,7 @@ dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
 IFACE="${activeWifi.iface}"
 AP_IFACE="${apIface}"
 PID_FILE="${WIFI_PID_FILE}"
+DENY_FILE="${WIFI_DENY_FILE}"
 
 if [ -f "\${PID_FILE}.dnsmasq" ]; then
   kill "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
@@ -441,12 +491,26 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/de
   firewall-cmd --zone=trusted --remove-interface="$AP_IFACE" 2>/dev/null || true
 fi
 
+# Clean up blacklist rules if existing
+if [ -f "$DENY_FILE" ]; then
+  while read -r mac; do
+    mac=$(echo "$mac" | tr -d '\r\n ')
+    if [ -n "$mac" ]; then
+      iptables -D INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+      iptables -D FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    fi
+  done < "$DENY_FILE"
+fi
+
 iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+
+rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
+nmcli general reload conf 2>/dev/null || true
 
 nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
 iw dev "$AP_IFACE" del 2>/dev/null || true

@@ -12,6 +12,10 @@ export const WIFI_DIR = path.join(LINKSY_DIR, 'wifi');
 export const WIFI_PID_FILE = path.join(LINKSY_DIR, 'wifi.pid');
 export const WIFI_LOG_FILE = path.join(LINKSY_DIR, 'wifi.log');
 export const WIFI_CONFIG_FILE = path.join(WIFI_DIR, 'hostapd.conf');
+export const WIFI_LEASES_FILE = path.join(WIFI_DIR, 'dnsmasq.leases');
+export const WIFI_DENY_FILE = path.join(WIFI_DIR, 'hostapd.deny');
+export const WIFI_ACCEPT_FILE = path.join(WIFI_DIR, 'hostapd.accept');
+export const HOSTAPD_CTRL_DIR = '/run/hostapd';
 
 export const BT_DIR = path.join(LINKSY_DIR, 'bluetooth');
 export const BT_PID_FILE = path.join(LINKSY_DIR, 'bluetooth.pid');

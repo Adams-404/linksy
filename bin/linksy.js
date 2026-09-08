@@ -8,6 +8,13 @@ import { offCommand } from '../src/commands/off.js';
 import { statusCommand } from '../src/commands/status.js';
 import { doctorCommand } from '../src/commands/doctor.js';
 import { uninstallCommand } from '../src/commands/uninstall.js';
+import {
+  blockCommand,
+  unblockCommand,
+  whitelistCommand,
+  unwhitelistCommand,
+  devicesCommand
+} from '../src/commands/block.js';
 
 const program = new Command();
 
@@ -21,6 +28,9 @@ Examples:
   $ linksy on --wifi                    # Share laptop Wi-Fi wirelessly to phone
   $ linksy on --wifi -p <password>      # Change hotspot password and connect
   $ linksy on --wifi --no-password      # Start open Wi-Fi network without password
+  $ linksy devices                      # View connected devices (IP, MAC, signal)
+  $ linksy block <device>               # Block a device from the Wi-Fi hotspot
+  $ linksy unblock <device>             # Unblock a device
   $ linksy on                           # Reverse tether over USB cable
   $ linksy status                       # Check active connection, SSID & password
   $ linksy off                          # Disconnect all active sessions
@@ -92,6 +102,59 @@ program
       await statusCommand();
     } catch (err) {
       logger.error(`Failed to check status: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('devices')
+  .description('List devices connected to the Linksy Wi-Fi hotspot with IPs, MACs, and signal strength')
+  .action(async () => {
+    try {
+      await devicesCommand();
+    } catch (err) {
+      logger.error(`Failed to get connected devices: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('block <device>')
+  .description('Block a device from accessing the Wi-Fi hotspot (by MAC, IP, or hostname)')
+  .action(async (device) => {
+    try {
+      await blockCommand(device);
+    } catch (err) {
+      logger.error(`Failed to block device: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('unblock <device>')
+  .description('Unblock a device to allow it to reconnect to the Wi-Fi hotspot')
+  .action(async (device) => {
+    try {
+      await unblockCommand(device);
+    } catch (err) {
+      logger.error(`Failed to unblock device: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('whitelist <device>')
+  .description('Whitelist a device (by MAC, IP, or hostname)')
+  .option('--remove', 'Remove the device from the whitelist')
+  .action(async (device, options) => {
+    try {
+      if (options.remove) {
+        await unwhitelistCommand(device);
+      } else {
+        await whitelistCommand(device);
+      }
+    } catch (err) {
+      logger.error(`Failed to update whitelist: ${err.message}`, err);
       process.exit(1);
     }
   });
