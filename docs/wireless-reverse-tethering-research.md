@@ -1,9 +1,9 @@
 # Wireless Reverse Tethering Research & Architecture
 
-> **Document Version**: 1.0.0  
+> **Document Version**: 1.1.0  
 > **Date**: September 2026  
 > **Target Project**: Linksy PhoneNet  
-> **Author**: Antigravity & Linksy Team  
+> **Author**: Adams-404  
 
 ---
 
@@ -219,21 +219,24 @@ Gnirehtet requires an existing IP connection between the phone and laptop before
 
 ---
 
-## 7. Recommended Roadmap for Linksy
+## 7. Implementation & Architecture Evolution
 
-To offer the cleanest user experience, Linksy can evolve from a USB-only tool into a multi-transport connectivity CLI:
+Linksy evolved from a USB-only tool into a full multi-transport connectivity CLI:
 
 ```text
 linksy on              # Default: Fast, zero-root USB reverse tethering
 linksy on --wifi       # High-speed wireless hotspot (AP+STA on matching channel)
 linksy on --bluetooth  # Wireless fallback via Bluetooth PAN NAP
+linksy devices         # Real-time list of connected devices with IP, MAC, and signal
+linksy block <device>  # Instant MAC/IP/hostname device blocking
+linksy unblock <dev>   # Instant ACL removal
 linksy doctor          # Comprehensive diagnostic for USB, Wi-Fi AP capability, and Bluetooth
 ```
 
-### Next Implementation Steps:
-1. **Wi-Fi AP Prototype**: Create a lightweight runner script that checks the active Wi-Fi channel on `wlp0s20f3`, provisions `ap0`, and runs `hostapd` + `dnsmasq`.
-2. **Bluetooth PAN Prototype**: Test BlueZ NAP bridge registration and Android connection pairing.
-3. **CLI Integration**: Expose these capabilities through the Linksy CLI command suite.
+### Production Architecture (Released in v1.1.0):
+1. **Wi-Fi AP (`src/lib/wifiHotspot.js`)**: Inspects active Wi-Fi channel on `wlp0s20f3`, provisions virtual `ap0` with pre-emptive NetworkManager exclusion, starts `hostapd` with control socket group permissions (`wheel`), and provisions `dnsmasq` DHCP with lease logging.
+2. **Bluetooth PAN (`src/lib/bluetoothPan.js`)**: BlueZ NAP bridge registration and dynamic D-Bus agent pairing with iptables routing.
+3. **Device Management & Telemetry (`src/lib/deviceManager.js`)**: Aggregates station dump (`nl80211`), DHCP lease mapping, and ARP table for live inspection and ACL modification via `hostapd_cli` without root.
 
 ---
 
@@ -291,10 +294,11 @@ Exposed via `linksy devices` and `linksy status`.
 ### 9.2 Device Access Control (Blacklisting & Whitelisting)
 Linksy implements a two-tier defense mechanism:
 - **Layer 2 (`hostapd` ACL & Deauthentication)**:
-  - `hostapd` is started with `ctrl_interface=/run/hostapd` and `deny_mac_file=~/.linksy/wifi/hostapd.deny` (or `accept_mac_file`).
-  - When a user runs `linksy block <device>`, Linksy resolves the hostname or IP to a MAC address, appends it to `hostapd.deny`, and issues live `disassociate` and `deauthenticate` commands via `hostapd_cli`.
+  - `hostapd` is started with `ctrl_interface=/run/hostapd`, `ctrl_interface_group=wheel` (or system admin group), and `deny_mac_file=~/.linksy/wifi/hostapd.deny` (or `accept_mac_file`).
+  - Configuring `ctrl_interface_group` enables `hostapd_cli` commands to run directly under the user's account without requiring root, `sudo`, or biometric prompts.
+  - When a user runs `linksy block <device>`, Linksy resolves the hostname or IP to a MAC address, appends it to `hostapd.deny`, dynamically updates hostapd's active memory via `hostapd_cli DENY_ACL ADD_MAC <mac>`, and issues live `deauthenticate` and `disassociate` commands.
 - **Layer 3 (Kernel Firewall Drop)**:
-  - Inserts immediate `iptables -I INPUT/FORWARD -i ap0 -m mac --mac-source <MAC> -j DROP` rules to prevent any queued or spoofed packets from reaching the laptop or upstream gateway.
+  - Inserts non-blocking `iptables -I INPUT/FORWARD -i ap0 -m mac --mac-source <MAC> -j DROP` rules to prevent any queued or spoofed packets from reaching the laptop or upstream gateway.
 
 ---
 
