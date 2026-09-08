@@ -22,3 +22,4 @@ export const BT_PID_FILE = path.join(LINKSY_DIR, 'bluetooth.pid');
 export const BT_LOG_FILE = path.join(LINKSY_DIR, 'bluetooth.log');
 
 export const CONFIG_FILE = path.join(LINKSY_DIR, 'config.json');
+export const UPDATE_CHECK_FILE = path.join(LINKSY_DIR, 'update-check.json');

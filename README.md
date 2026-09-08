@@ -79,6 +79,7 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 | `linksy unblock <device>` | Remove a device from the blacklist |
 | `linksy whitelist <device>` | Whitelist a device (pass `--remove` to unwhitelist) |
 | `linksy doctor` | Comprehensive diagnostic checks with copy-pasteable fix commands |
+| `linksy update` | Automatically check for and install the latest version from NPM |
 | `linksy uninstall` | Clean up `~/.linksy/` binaries and temporary files |
 
 ### Example Workflows

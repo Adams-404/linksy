@@ -16,13 +16,15 @@ import {
   devicesCommand
 } from '../src/commands/block.js';
 import { nameCommand } from '../src/commands/name.js';
+import { updateCommand } from '../src/commands/update.js';
+import { getCliVersion, notifyIfUpdateAvailable } from '../src/lib/updateNotifier.js';
 
 const program = new Command();
 
 program
   .name('linksy-phonenet')
   .description('Reverse tethering CLI for Linux — share laptop Wi-Fi with Android wirelessly or over USB without root')
-  .version('1.2.1')
+  .version(getCliVersion())
   .option('--verbose', 'Show detailed error output and debug messages')
   .addHelpText('after', `
 Examples:
@@ -36,6 +38,7 @@ Examples:
   $ linksy unblock <device>             # Unblock a device
   $ linksy on                           # Reverse tether over USB cable
   $ linksy status                       # Check active connection, SSID & password
+  $ linksy update                       # Update Linksy to latest version
   $ linksy off                          # Disconnect all active sessions
 `)
   .hook('preAction', (thisCommand) => {
@@ -43,6 +46,9 @@ Examples:
     if (opts.verbose) {
       setVerbose(true);
     }
+  })
+  .hook('postAction', () => {
+    notifyIfUpdateAvailable();
   });
 
 program
@@ -184,6 +190,18 @@ program
       await doctorCommand();
     } catch (err) {
       logger.error(`Diagnostics encountered an error: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('update')
+  .description('Update Linksy to the latest version from NPM')
+  .action(async () => {
+    try {
+      await updateCommand();
+    } catch (err) {
+      logger.error(`Update failed: ${err.message}`, err);
       process.exit(1);
     }
   });

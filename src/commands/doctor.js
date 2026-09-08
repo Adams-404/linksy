@@ -6,6 +6,7 @@ import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { checkWifiCapability } from '../lib/checkWifiCapability.js';
 import { isHostapdInstalled, isDnsmasqInstalled, getActiveWifiConnection } from '../lib/wifiHotspot.js';
 import { checkBluetoothAvailability } from '../lib/bluetoothPan.js';
+import { getCliVersion, checkForUpdates } from '../lib/updateNotifier.js';
 import { logger } from '../utils/logger.js';
 
 export async function doctorCommand() {
@@ -13,6 +14,34 @@ export async function doctorCommand() {
   console.log(chalk.bold('--- Linksy Doctor Diagnostics ---\n'));
 
   let allChecksPassed = true;
+
+  // Check 0: Linksy version & update status
+  const currentVersion = getCliVersion();
+  const updateInfo = await checkForUpdates({ currentVersion, timeoutMs: 2500, force: false });
+  if (updateInfo.hasUpdate) {
+    console.log(
+      chalk.yellow('⚠') +
+      ' ' +
+      chalk.bold('Linksy version:       ') +
+      chalk.yellow(` v${updateInfo.currentVersion}`) +
+      chalk.dim(' (update available: ') +
+      chalk.green.bold(`v${updateInfo.latestVersion}`) +
+      chalk.dim(')')
+    );
+    console.log(
+      chalk.yellow('  ↳ Fix:') +
+      ' Run ' +
+      chalk.cyan('linksy update') +
+      ' to update to the latest version.\n'
+    );
+  } else {
+    console.log(
+      chalk.green('✔') +
+      ' ' +
+      chalk.bold('Linksy version:       ') +
+      chalk.dim(` v${currentVersion} (up to date)`)
+    );
+  }
 
   // Check 1: adb installed and on PATH
   const adbOk = isAdbInstalled();

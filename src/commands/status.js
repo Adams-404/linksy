@@ -6,11 +6,16 @@ import { isProcessRunning } from './on.js';
 import { getWifiHotspotStatus, getDefaultHotspotSsid } from '../lib/wifiHotspot.js';
 import { getBluetoothPanStatus } from '../lib/bluetoothPan.js';
 import { getConnectedDevices, getBlocklist } from '../lib/deviceManager.js';
+import { getCliVersion, notifyIfUpdateAvailable } from '../lib/updateNotifier.js';
 import { logger } from '../utils/logger.js';
 
 export async function statusCommand() {
   logger.banner();
   console.log(chalk.bold('--- Linksy System Status ---\n'));
+
+  // 0. CLI Version
+  const currentVersion = getCliVersion();
+  console.log(chalk.green('✔') + ' Linksy CLI version:   ' + chalk.bold(`v${currentVersion}`));
 
   // 1. Gnirehtet installation
   const isGnirehtetInstalled = fs.existsSync(GNIREHTET_BIN);
@@ -114,4 +119,5 @@ export async function statusCommand() {
     console.log(`  • Over USB cable:           ${chalk.cyan('linksy on')}`);
   }
   console.log('');
+  notifyIfUpdateAvailable(currentVersion);
 }
