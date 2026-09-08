@@ -130,6 +130,20 @@ export function getRegulatoryCountry() {
 }
 
 /**
+ * Detects the system admin group for control socket permissions (wheel on Fedora/Arch, sudo/adm on Debian).
+ * @returns {string}
+ */
+export function getAdminGroup() {
+  try {
+    const groups = execSync('groups', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] }).trim().split(/\s+/);
+    for (const g of ['wheel', 'sudo', 'adm']) {
+      if (groups.includes(g)) return g;
+    }
+  } catch {}
+  return 'wheel';
+}
+
+/**
  * Generates hostapd configuration matching the upstream Wi-Fi channel.
  * @param {{ apIface: string, ssid: string, password?: string, channel: number, hwMode: 'a'|'g', countryCode?: string }} params
  * @returns {string}
@@ -142,6 +156,7 @@ export function generateHostapdConfig({
   hwMode = 'a',
   countryCode = null,
   ctrlInterface = HOSTAPD_CTRL_DIR,
+  ctrlGroup = 'wheel',
   denyMacFile = WIFI_DENY_FILE,
   acceptMacFile = WIFI_ACCEPT_FILE,
   whitelistMode = false
@@ -159,6 +174,9 @@ export function generateHostapdConfig({
 
   if (ctrlInterface) {
     lines.push(`ctrl_interface=${ctrlInterface}`);
+    if (ctrlGroup) {
+      lines.push(`ctrl_interface_group=${ctrlGroup}`);
+    }
   }
 
   if (whitelistMode && acceptMacFile && fs.existsSync(acceptMacFile)) {
@@ -371,12 +389,15 @@ export async function startWifiHotspot(options = {}) {
     try { fs.writeFileSync(WIFI_ACCEPT_FILE, saved.whitelist.join('\n') + '\n', 'utf8'); } catch {}
   }
 
+  const adminGroup = getAdminGroup();
+
   const configContent = generateHostapdConfig({
     apIface,
     ssid,
     password,
     channel: activeWifi.channel,
     hwMode: activeWifi.hwMode,
+    ctrlGroup: adminGroup,
     whitelistMode: saved.whitelistMode === true
   });
 
@@ -394,6 +415,7 @@ PID_FILE="${WIFI_PID_FILE}"
 LOG_FILE="${WIFI_LOG_FILE}"
 LEASES_FILE="${WIFI_LEASES_FILE}"
 DENY_FILE="${WIFI_DENY_FILE}"
+ADMIN_GROUP="${adminGroup}"
 
 # Clear previous log
 : > "$LOG_FILE"
@@ -405,7 +427,10 @@ cat << 'NMEOF' > /run/NetworkManager/conf.d/99-linksy.conf
 unmanaged-devices=interface-name:ap0;interface-name:pan0
 NMEOF
 nmcli general reload conf 2>/dev/null || true
+
 mkdir -p /run/hostapd
+chgrp "$ADMIN_GROUP" /run/hostapd 2>/dev/null || true
+chmod 775 /run/hostapd 2>/dev/null || true
 
 # 1. Clean up stale ap interface if existing
 iw dev "$AP_IFACE" del 2>/dev/null || true

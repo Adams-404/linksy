@@ -250,13 +250,18 @@ export function blockDevice(identifier) {
   // If hotspot is running, dynamically kick the station and insert iptables drop
   if (isHotspotRunning()) {
     try {
-      spawnSync('sudo', ['hostapd_cli', '-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'disassociate', mac], { stdio: 'ignore', timeout: 2000 });
-      spawnSync('sudo', ['hostapd_cli', '-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'deauthenticate', mac], { stdio: 'ignore', timeout: 2000 });
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'DENY_ACL', 'ADD_MAC', mac], { timeout: 2000 });
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'deauthenticate', mac], { timeout: 2000 });
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'disassociate', mac], { timeout: 2000 });
     } catch {}
 
     try {
-      spawnSync('sudo', ['iptables', '-I', 'INPUT', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 2000 });
-      spawnSync('sudo', ['iptables', '-I', 'FORWARD', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 2000 });
+      spawnSync('sudo', ['-n', 'hostapd_cli', '-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'deauthenticate', mac], { stdio: 'ignore', timeout: 1000 });
+    } catch {}
+
+    try {
+      spawnSync('sudo', ['-n', 'iptables', '-I', 'INPUT', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 1000 });
+      spawnSync('sudo', ['-n', 'iptables', '-I', 'FORWARD', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 1000 });
     } catch {}
   }
 
@@ -285,8 +290,16 @@ export function unblockDevice(identifier) {
 
   if (isHotspotRunning()) {
     try {
-      spawnSync('sudo', ['iptables', '-D', 'INPUT', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 2000 });
-      spawnSync('sudo', ['iptables', '-D', 'FORWARD', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 2000 });
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'DENY_ACL', 'DEL_MAC', mac], { timeout: 2000 });
+    } catch {}
+
+    try {
+      spawnSync('sudo', ['-n', 'hostapd_cli', '-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'DENY_ACL', 'DEL_MAC', mac], { stdio: 'ignore', timeout: 1000 });
+    } catch {}
+
+    try {
+      spawnSync('sudo', ['-n', 'iptables', '-D', 'INPUT', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 1000 });
+      spawnSync('sudo', ['-n', 'iptables', '-D', 'FORWARD', '-i', 'ap0', '-m', 'mac', '--mac-source', mac, '-j', 'DROP'], { stdio: 'ignore', timeout: 1000 });
     } catch {}
   }
 
@@ -318,6 +331,12 @@ export function whitelistDevice(identifier) {
     fs.writeFileSync(WIFI_ACCEPT_FILE, current.join('\n') + '\n', 'utf8');
   } catch {}
 
+  if (isHotspotRunning()) {
+    try {
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'ACCEPT_ACL', 'ADD_MAC', mac], { timeout: 2000 });
+    } catch {}
+  }
+
   return { success: true, mac };
 }
 
@@ -340,6 +359,13 @@ export function unwhitelistDevice(identifier) {
   try {
     fs.writeFileSync(WIFI_ACCEPT_FILE, updated.join('\n') + '\n', 'utf8');
   } catch {}
+
+  if (isHotspotRunning()) {
+    try {
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'ACCEPT_ACL', 'DEL_MAC', mac], { timeout: 2000 });
+      spawnSync('hostapd_cli', ['-p', HOSTAPD_CTRL_DIR, '-i', 'ap0', 'deauthenticate', mac], { timeout: 2000 });
+    } catch {}
+  }
 
   return { success: true, mac };
 }
