@@ -49,9 +49,10 @@ export const logger = {
   },
 
   banner() {
-    console.log(chalk.bold.hex('#3498db')('\n╭───────────────────────────────────────────────────╮'));
-    console.log(chalk.bold.hex('#3498db')('│') + chalk.bold.white('  📱 Linksy PhoneNet — Reverse USB Tethering       ') + chalk.bold.hex('#3498db')('│'));
-    console.log(chalk.bold.hex('#3498db')('│') + chalk.dim('  Share your Wi-Fi connection over USB effortlessly') + chalk.bold.hex('#3498db')('│'));
-    console.log(chalk.bold.hex('#3498db')('╰───────────────────────────────────────────────────╯\n'));
+    const dashes = '─'.repeat(53);
+    console.log(chalk.bold.hex('#3498db')(`\n╭${dashes}╮`));
+    console.log(chalk.bold.hex('#3498db')('│') + chalk.bold.white('  📱 Linksy PhoneNet — Wireless & Reverse Tethering  ') + chalk.bold.hex('#3498db')('│'));
+    console.log(chalk.bold.hex('#3498db')('│') + chalk.dim('  Share your Wi-Fi connection wirelessly or over USB ') + chalk.bold.hex('#3498db')('│'));
+    console.log(chalk.bold.hex('#3498db')(`╰${dashes}╯\n`));
   }
 };

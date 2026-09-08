@@ -1,9 +1,9 @@
 # AGENTS.md — Linksy
 
 ## What this project is
-Linksy is an npm CLI tool that automates reverse USB tethering on Linux
-(sharing a laptop's Wi-Fi internet to an Android phone over USB cable)
-by wrapping `adb` and `gnirehtet`. See README.md for the full pitch.
+Linksy is an npm CLI tool that automates reverse tethering on Linux
+(sharing a laptop's Wi-Fi internet to an Android phone wirelessly or over USB cable)
+by wrapping `adb`, `gnirehtet`, and native Linux virtual AP/Bluetooth routing. See README.md for the full pitch.
 
 ## Core invariant — never hardcode Gnirehtet release URLs or filenames
 Gnirehtet's GitHub release asset naming has changed before (e.g.
