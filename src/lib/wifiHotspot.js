@@ -556,10 +556,9 @@ fi
 # 3. Tell NetworkManager not to interfere with virtual AP interface
 nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
 
-# 4. Bring up interface and assign private IP
+# 4. Flush stale IP and keep interface DOWN so hostapd can bind the radio cleanly
+ip link set "$AP_IFACE" down 2>/dev/null || true
 ip addr flush dev "$AP_IFACE" 2>/dev/null || true
-ip addr add 192.168.42.1/24 dev "$AP_IFACE"
-ip link set "$AP_IFACE" up 2>/dev/null || true
 
 # 5. Enable IP forwarding and firewall/NAT rules
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
@@ -593,7 +592,7 @@ iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
 hostapd -B -P "$PID_FILE" "$CONF" >> "$LOG_FILE" 2>&1
 sleep 1
 
-# Ensure interface is UP with IP after hostapd binding
+# Bring interface UP and assign private IP after hostapd initializes radio and beaconing
 ip link set "$AP_IFACE" up 2>/dev/null || true
 ip addr add 192.168.42.1/24 dev "$AP_IFACE" 2>/dev/null || true
 
