@@ -1,6 +1,6 @@
 {
   "name": "linksy-phonenet",
-  "version": "1.3.0",
+  "version": "1.3.1",
   "description": "Reverse tethering CLI for Linux — share laptop Wi-Fi with your Android phone wirelessly or over USB without root",
   "main": "bin/linksy.js",
   "bin": {

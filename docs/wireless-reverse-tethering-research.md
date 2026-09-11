@@ -325,3 +325,27 @@ Linksy prevents this race condition entirely by pre-configuring NetworkManager *
 3. NetworkManager's udev handler immediately ignores `ap0` and `pan0` upon creation. `wpa_supplicant` is never asked to touch the virtual interface, eliminating the radio reinitialization and preserving the upstream Wi-Fi connection with zero drops.
 4. On `linksy off`, the transient configuration in `/run` is deleted and reloaded.
 
+---
+
+## 11. Hardware Compatibility: Intel 8265, PCIe Adapters & The Invisible Hotspot Fix
+
+### 11.1 Symptom
+On certain laptops (such as the Dell Latitude 7490 equipped with an Intel Dual Band Wireless-AC 8265 or PCIe wireless cards), `linksy on --wifi` reported success and `hostapd` started without error. However, client devices (smartphones, other laptops) could not see or discover the broadcasted SSID.
+
+### 11.2 Root Cause Analysis
+Deep analysis of kernel wireless subsystem (`mac80211`/`cfg80211`) and card firmware revealed three interacting issues:
+1. **Virtual BSSID MAC Duplication**:
+   Unlike integrated CNVi cards (e.g. Intel 9560 on ThinkPad T490) where the kernel generates a distinct virtual MAC, PCIe modules like Intel 8265 assign the exact same hardware MAC address to `ap0` as the active station `wlp0s20f3`. When the AP BSSID matches the station client MAC, the card firmware/driver filters or drops outgoing beacon frames.
+2. **Interface Link State Pre-Activation**:
+   Bringing the `ap0` interface `UP` via `ip link set dev ap0 up` *before* `hostapd` initialization caused `nl80211` driver radio configuration to fail or enter a non-beaconing state on certain cards. `hostapd` requires the interface link state to be down prior to radio binding.
+3. **Self-Managed Regulatory Firmware (LAR) & Country Code**:
+   Intel wireless cards implement Location-Aware Regulatory (LAR) tables directly in card firmware (`phy#0 (self-managed) country 00: DFS-UNSET`). Injecting `country_code` into `hostapd.conf` forces `hostapd` to send a country update request to the kernel driver, trapping the daemon in `COUNTRY_UPDATE` state where beacon frames are inhibited.
+
+### 11.3 The Resolution
+Linksy resolves these hardware variations automatically:
+1. **Dynamic MAC Collision Detection & LAA Derivation**:
+   When creating `ap0`, Linksy compares `ap0`'s MAC with the physical adapter's MAC. If identical, Linksy dynamically calculates and assigns a distinct Locally Administered Address (LAA) with the unicast bit preserved (`ip link set dev ap0 address <new_mac>`).
+2. **Clean Interface Lifecycle Sequencing**:
+   `ap0` is kept strictly `DOWN` while `hostapd` binds the `nl80211` radio and configures beacons. Only after `hostapd` binds is the link brought `UP` and the private subnet IP assigned.
+3. **Elimination of Unsolicited Country Updates**:
+   In concurrent STA+AP mode, the radio already operates within the valid regulatory constraints of the upstream connected router. Omitting unsolicited `country_code` entries prevents self-managed adapters from entering `COUNTRY_UPDATE` stalls, allowing instant beaconing across all supported machines.
