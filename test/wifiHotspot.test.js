@@ -116,6 +116,31 @@ describe('wifiHotspot - generateHostapdConfig', () => {
     expect(conf).not.toContain('wpa=2');
     expect(conf).not.toContain('wpa_passphrase=');
   });
+
+  it('omits country_code by default to prevent regulatory update stalls on self-managed firmware', () => {
+    const conf = generateHostapdConfig({
+      apIface: 'ap0',
+      ssid: 'TestHotspot',
+      channel: 157,
+      hwMode: 'a'
+    });
+
+    expect(conf).not.toContain('country_code=');
+    expect(conf).not.toContain('ieee80211d=');
+  });
+
+  it('includes country_code and ieee80211d when explicitly specified', () => {
+    const conf = generateHostapdConfig({
+      apIface: 'ap0',
+      ssid: 'TestHotspot',
+      channel: 157,
+      hwMode: 'a',
+      countryCode: 'US'
+    });
+
+    expect(conf).toContain('country_code=US');
+    expect(conf).toContain('ieee80211d=1');
+  });
 });
 
 describe('wifiHotspot - getWifiHotspotStatus', () => {

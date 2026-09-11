@@ -257,7 +257,7 @@ export function generateHostapdConfig({
   acceptMacFile = WIFI_ACCEPT_FILE,
   whitelistMode = false
 }) {
-  const code = countryCode || getRegulatoryCountry();
+  const code = countryCode || null;
   const finalSsid = ssid || getDefaultHotspotSsid();
   const lines = [
     `interface=${apIface}`,
