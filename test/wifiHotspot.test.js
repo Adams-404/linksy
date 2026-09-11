@@ -3,7 +3,8 @@ import {
   parseActiveWifiInfo,
   generateHostapdConfig,
   getWifiHotspotStatus,
-  getDefaultHotspotSsid
+  getDefaultHotspotSsid,
+  generateApMac
 } from '../src/lib/wifiHotspot.js';
 
 describe('wifiHotspot - parseActiveWifiInfo', () => {
@@ -141,5 +142,29 @@ describe('wifiHotspot - getDefaultHotspotSsid', () => {
   it('contains valid SSID characters without spaces', () => {
     const ssid = getDefaultHotspotSsid();
     expect(ssid).toMatch(/^[a-zA-Z0-9_-]+$/);
+  });
+});
+
+describe('wifiHotspot - generateApMac', () => {
+  it('generates a distinct LAA MAC address from physical MAC', () => {
+    const apMac = generateApMac('82:66:e9:b9:4f:8c');
+    expect(apMac).toBe('82:66:e9:b9:4f:8d');
+  });
+
+  it('sets bit 1 (locally administered) and clears bit 0 (unicast)', () => {
+    const apMac = generateApMac('00:11:22:33:44:55');
+    expect(apMac).toBe('02:11:22:33:44:56');
+  });
+
+  it('handles last octet overflow with modulo 256 wrap-around', () => {
+    const apMac = generateApMac('82:66:e9:b9:4f:ff');
+    expect(apMac).toBe('82:66:e9:b9:4f:00');
+  });
+
+  it('returns null for empty, null, or malformed MAC addresses', () => {
+    expect(generateApMac(null)).toBeNull();
+    expect(generateApMac('')).toBeNull();
+    expect(generateApMac('not-a-mac')).toBeNull();
+    expect(generateApMac('00:11:22:33:44')).toBeNull();
   });
 });

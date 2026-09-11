@@ -222,6 +222,24 @@ export function getAdminGroup() {
 }
 
 /**
+ * Generates a valid unicast locally administered address (LAA) MAC address based on physical MAC.
+ * Prevents virtual AP interface from colliding with client station MAC on chipsets (e.g. Intel 8265)
+ * that require unique BSSIDs for beaconing and RX filtering.
+ * @param {string} baseMac - Physical MAC address (e.g. 82:66:e9:b9:4f:8c).
+ * @returns {string|null} Derived distinct LAA MAC address.
+ */
+export function generateApMac(baseMac) {
+  if (!baseMac || typeof baseMac !== 'string') return null;
+  const parts = baseMac.trim().split(':');
+  if (parts.length !== 6) return null;
+  // Set locally administered bit (bit 1 of byte 0) and clear multicast bit (bit 0)
+  const b0 = ((parseInt(parts[0], 16) | 0x02) & 0xfe).toString(16).padStart(2, '0');
+  // Increment last byte by 1 (modulo 256) to ensure it does not collide with baseMac
+  const b5 = ((parseInt(parts[5], 16) + 1) & 0xff).toString(16).padStart(2, '0');
+  return [b0, parts[1], parts[2], parts[3], parts[4], b5].join(':').toLowerCase();
+}
+
+/**
  * Generates hostapd configuration matching the upstream Wi-Fi channel.
  * @param {{ apIface: string, ssid: string, password?: string, channel: number, hwMode: 'a'|'g', countryCode?: string }} params
  * @returns {string}
@@ -523,6 +541,18 @@ iw dev "$AP_IFACE" del 2>/dev/null || true
 # 2. Add virtual AP interface
 iw dev "$IFACE" interface add "$AP_IFACE" type __ap
 
+# Ensure distinct MAC address if virtual AP inherited identical MAC to physical adapter
+# (prevents duplicate BSSID beacon rejection on Intel 8265 and PCIe chipsets)
+AP_MAC=$(cat /sys/class/net/"$AP_IFACE"/address 2>/dev/null || true)
+PHY_MAC=$(cat /sys/class/net/"$IFACE"/address 2>/dev/null || true)
+if [ -n "$AP_MAC" ] && [ "$AP_MAC" = "$PHY_MAC" ]; then
+  FIRST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC%%:*} | 2) & 254 )))
+  LAST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC##*:} + 1) % 256 )))
+  NEW_MAC="\${FIRST_BYTE}\${AP_MAC#??}"
+  NEW_MAC="\${NEW_MAC%??}\${LAST_BYTE}"
+  ip link set dev "$AP_IFACE" address "$NEW_MAC" 2>/dev/null || true
+fi
+
 # 3. Tell NetworkManager not to interfere with virtual AP interface
 nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
 
@@ -556,7 +586,7 @@ iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
+iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
 # 6. Start hostapd in daemon mode with PID file
