@@ -694,6 +694,7 @@ iw dev "$AP_IFACE" del 2>/dev/null || true
     `  • Channel:             ${chalk.cyan(activeWifi.channel)} (${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'})\n` +
     `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n\n` +
     `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
+    `Or scan the QR code to connect instantly: ${chalk.bold.cyan('linksy qr')}\n\n` +
     `Run ${chalk.bold.cyan('linksy off')} at any time to stop the hotspot.\n`
   );
 }

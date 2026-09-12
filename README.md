@@ -66,6 +66,7 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 | `phonenet-off` | Stop all active Linksy connections (USB, Wi-Fi hotspot, or Bluetooth) |
 | `phonenet-status` | Display status across USB, Wi-Fi hotspot, and Bluetooth PAN |
 | `phonenet-doctor` | Run diagnostic checks for ADB, Wi-Fi AP capability, and Bluetooth |
+| `phonenet-qr` | Display scannable Wi-Fi QR code in the terminal for instant mobile connection |
 
 ### Subcommands (`phonenet` or `linksy-phonenet`)
 | Command | Description |
@@ -73,6 +74,7 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 | `linksy on` | Start reverse tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-n` / `--name <name>`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `--no-password`) |
 | `linksy off` | Stop all active tethering and hotspot services |
 | `linksy status` | Display status of USB, Wi-Fi hotspot, connected devices, and Bluetooth sessions |
+| `linksy qr` | Display a scannable Wi-Fi QR code in the terminal for instant phone connection (options: `-s`, `-p`, `--open`) |
 | `linksy name [new-name]` | View or change your default Wi-Fi hotspot name (SSID) |
 | `linksy devices` | View connected devices with hostname, IP, MAC, signal strength, and transfer stats |
 | `linksy block <device>` | Disconnect and blacklist a device by hostname, IP, or MAC address |
@@ -105,6 +107,8 @@ linksy on -w -n "Adams-Hotspot" -p "<your-password>"
 linksy on --wifi --no-password
 
 # On your phone: Open Wi-Fi settings, connect to your network
+# Or display a scannable QR code on your terminal screen:
+linksy qr
 # Enjoy high-speed wireless internet shared from your laptop!
 
 # See who is connected to your hotspot (device name, IP, signal, data usage):

@@ -10,6 +10,7 @@
     "phonenet-off": "./bin/phonenet-off.js",
     "phonenet-status": "./bin/phonenet-status.js",
     "phonenet-doctor": "./bin/phonenet-doctor.js",
+    "phonenet-qr": "./bin/phonenet-qr.js",
     "linksy": "./bin/linksy.js"
   },
   "type": "module",
@@ -51,7 +52,8 @@
     "adm-zip": "^0.5.16",
     "chalk": "^5.4.1",
     "commander": "^13.1.0",
-    "ora": "^8.2.0"
+    "ora": "^8.2.0",
+    "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "vitest": "^3.0.7"
