@@ -54,6 +54,7 @@ export async function statusCommand() {
       console.log(chalk.dim('   • Password:         ') + chalk.bold.magenta('None (Open Network)'));
     }
     console.log(chalk.dim('   • Channel / Band:   ') + chalk.cyan(`Channel ${wifiStatus.channel || '?'}`) + chalk.dim(` (PID: ${wifiStatus.pid})`));
+    console.log(chalk.dim('   • Quick Connect:    ') + chalk.cyan('Run `linksy qr` to display scannable QR code'));
 
     const devices = getConnectedDevices('ap0');
     if (devices.length > 0) {

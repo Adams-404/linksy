@@ -16,6 +16,7 @@ import {
   devicesCommand
 } from '../src/commands/block.js';
 import { nameCommand } from '../src/commands/name.js';
+import { qrCommand } from '../src/commands/qr.js';
 import { updateCommand } from '../src/commands/update.js';
 import { getCliVersion, notifyIfUpdateAvailable } from '../src/lib/updateNotifier.js';
 
@@ -33,6 +34,7 @@ Examples:
   $ linksy on --wifi --no-password      # Start open Wi-Fi network without password
   $ linksy name                         # View current hotspot name (e.g. Linksy-ThinkPad)
   $ linksy name "My-Hotspot"            # Change default hotspot name
+  $ linksy qr                           # Display scannable Wi-Fi QR code for mobile connection
   $ linksy devices                      # View connected devices (IP, MAC, signal)
   $ linksy block <device>               # Block a device from the Wi-Fi hotspot
   $ linksy unblock <device>             # Unblock a device
@@ -125,6 +127,31 @@ program
       await nameCommand(newName);
     } catch (err) {
       logger.error(`Failed to update hotspot name: ${err.message}`, err);
+      process.exit(1);
+    }
+  });
+
+program
+  .command('qr')
+  .alias('qrcode')
+  .description('Display a scannable Wi-Fi QR code in the terminal to quickly connect your phone')
+  .option('-s, --ssid <name>', 'Wi-Fi hotspot SSID (defaults to active or saved hotspot)')
+  .option('-n, --name <name>', 'Alias for --ssid')
+  .option('-p, --password <pass>', 'Wi-Fi password (defaults to active or saved password)')
+  .option('--no-password', 'Generate QR code for an open network without password')
+  .option('--open', 'Alias for --no-password')
+  .addHelpText('after', `
+Examples:
+  $ linksy qr                           # Display QR code for active or saved Wi-Fi hotspot
+  $ linksy qr -p <password>             # Display QR code with custom password
+  $ linksy qr --no-password             # Display QR code for open network
+  $ linksy qr -s "MyNetwork" -p "pass"  # Display QR code for custom network
+`)
+  .action(async (options) => {
+    try {
+      await qrCommand(options);
+    } catch (err) {
+      logger.error(`Failed to display QR code: ${err.message}`, err);
       process.exit(1);
     }
   });
