@@ -2,6 +2,10 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 import fs from 'node:fs';
 import {
   parseActiveWifiInfo,
+  getChannelFromFrequency,
+  getFrequencyFromChannel,
+  parseNmcliWifiLine,
+  isIwInstalled,
   generateHostapdConfig,
   getWifiHotspotStatus,
   getDefaultHotspotSsid,
@@ -71,6 +75,123 @@ Interface wlan0
       ssid: null,
       width: null
     });
+  });
+
+  it('derives channel from frequency when channel is omitted in iw output (Intel iwlwifi / Ubuntu)', () => {
+    const output = `
+Connected to 04:d9:f5:12:34:56 (on wlo1)
+\tSSID: Silicon_Rubi_Hotspot
+\tfreq: 2437.0
+\tRX: 12345 bytes
+    `;
+    const parsed = parseActiveWifiInfo(output);
+    expect(parsed.connected).toBe(true);
+    expect(parsed.channel).toBe(6);
+    expect(parsed.freq).toBe(2437);
+    expect(parsed.hwMode).toBe('g');
+    expect(parsed.ssid).toBe('Silicon_Rubi_Hotspot');
+  });
+
+  it('derives 5GHz channel from frequency when channel is omitted in iw output', () => {
+    const output = `
+Connected to 04:d9:f5:12:34:56 (on wlo1)
+\tSSID: Silicon_Rubi_5G
+\tfreq: 5240.0
+\tRX: 12345 bytes
+    `;
+    const parsed = parseActiveWifiInfo(output);
+    expect(parsed.connected).toBe(true);
+    expect(parsed.channel).toBe(48);
+    expect(parsed.freq).toBe(5240);
+    expect(parsed.hwMode).toBe('a');
+    expect(parsed.ssid).toBe('Silicon_Rubi_5G');
+  });
+});
+
+describe('wifiHotspot - frequency and channel conversions', () => {
+  it('maps 2.4 GHz frequencies to correct channels', () => {
+    expect(getChannelFromFrequency(2412)).toBe(1);
+    expect(getChannelFromFrequency(2437)).toBe(6);
+    expect(getChannelFromFrequency(2462)).toBe(11);
+    expect(getChannelFromFrequency(2472)).toBe(13);
+    expect(getChannelFromFrequency(2484)).toBe(14);
+  });
+
+  it('maps 5 GHz frequencies to correct channels', () => {
+    expect(getChannelFromFrequency(5180)).toBe(36);
+    expect(getChannelFromFrequency(5240)).toBe(48);
+    expect(getChannelFromFrequency(5745)).toBe(149);
+    expect(getChannelFromFrequency(5785)).toBe(157);
+  });
+
+  it('maps channels to correct frequencies', () => {
+    expect(getFrequencyFromChannel(1)).toBe(2412);
+    expect(getFrequencyFromChannel(6)).toBe(2437);
+    expect(getFrequencyFromChannel(11)).toBe(2462);
+    expect(getFrequencyFromChannel(14)).toBe(2484);
+    expect(getFrequencyFromChannel(36)).toBe(5180);
+    expect(getFrequencyFromChannel(157)).toBe(5785);
+  });
+
+  it('returns null for invalid frequencies or channels', () => {
+    expect(getChannelFromFrequency(0)).toBeNull();
+    expect(getChannelFromFrequency(1000)).toBeNull();
+    expect(getFrequencyFromChannel(0)).toBeNull();
+    expect(getFrequencyFromChannel(300)).toBeNull();
+  });
+});
+
+describe('wifiHotspot - parseNmcliWifiLine', () => {
+  it('parses in-use 2.4 GHz Wi-Fi line from nmcli terse output', () => {
+    const line = '*:Silicon_Rubi_Hotspot:6:2437 MHz:wlp0s20f3';
+    const parsed = parseNmcliWifiLine(line);
+    expect(parsed).toEqual({
+      inUse: true,
+      ssid: 'Silicon_Rubi_Hotspot',
+      channel: 6,
+      freq: 2437,
+      iface: 'wlp0s20f3'
+    });
+  });
+
+  it('parses in-use 5 GHz Wi-Fi line from nmcli terse output', () => {
+    const line = '*:Silicon_Rubi_5G:157:5785 MHz:wlo1';
+    const parsed = parseNmcliWifiLine(line);
+    expect(parsed).toEqual({
+      inUse: true,
+      ssid: 'Silicon_Rubi_5G',
+      channel: 157,
+      freq: 5785,
+      iface: 'wlo1'
+    });
+  });
+
+  it('handles SSID with colons correctly', () => {
+    const line = '*:Office\\:Guest\\:Wifi:36:5180 MHz:wlo1';
+    const parsed = parseNmcliWifiLine(line);
+    expect(parsed.inUse).toBe(true);
+    expect(parsed.ssid).toBe('Office:Guest:Wifi');
+    expect(parsed.channel).toBe(36);
+    expect(parsed.freq).toBe(5180);
+    expect(parsed.iface).toBe('wlo1');
+  });
+
+  it('returns inUse false for non-active networks', () => {
+    const line = ' :Other_Network:11:2462 MHz:wlp0s20f3';
+    const parsed = parseNmcliWifiLine(line);
+    expect(parsed.inUse).toBe(false);
+    expect(parsed.ssid).toBe('Other_Network');
+  });
+
+  it('returns null for empty or malformed line', () => {
+    expect(parseNmcliWifiLine('')).toBeNull();
+    expect(parseNmcliWifiLine('invalid:line')).toBeNull();
+  });
+});
+
+describe('wifiHotspot - isIwInstalled', () => {
+  it('returns a boolean status', () => {
+    expect(typeof isIwInstalled()).toBe('boolean');
   });
 });
 

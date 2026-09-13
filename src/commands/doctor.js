@@ -5,6 +5,7 @@ import { isAdbInstalled, getAdbVersion } from '../lib/installAdb.js';
 import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { checkWifiCapability } from '../lib/checkWifiCapability.js';
 import {
+  isIwInstalled,
   isHostapdInstalled,
   isDnsmasqInstalled,
   getActiveWifiConnection,
@@ -110,6 +111,7 @@ export async function doctorCommand() {
 
   // Check 5: Wi-Fi card capability and hotspot tools
   const wifiCap = checkWifiCapability();
+  const iwOk = isIwInstalled();
   const hostapdOk = isHostapdInstalled();
   const dnsmasqOk = isDnsmasqInstalled();
   const activeWifi = getActiveWifiConnection();
@@ -120,10 +122,11 @@ export async function doctorCommand() {
     console.log(chalk.yellow('○') + ' ' + chalk.bold('Wi-Fi AP+STA support: ') + chalk.dim(` Driver reports single interface mode`));
   }
 
-  if (hostapdOk && dnsmasqOk) {
-    console.log(chalk.green('✔') + ' ' + chalk.bold('Wi-Fi Hotspot tools:  ') + chalk.dim(' hostapd and dnsmasq installed'));
+  if (iwOk && hostapdOk && dnsmasqOk) {
+    console.log(chalk.green('✔') + ' ' + chalk.bold('Wi-Fi Hotspot tools:  ') + chalk.dim(' iw, hostapd, and dnsmasq installed'));
   } else {
     const missingTools = [];
+    if (!iwOk) missingTools.push('iw');
     if (!hostapdOk) missingTools.push('hostapd');
     if (!dnsmasqOk) missingTools.push('dnsmasq');
     console.log(chalk.yellow('○') + ' ' + chalk.bold('Wi-Fi Hotspot tools:  ') + chalk.yellow(` Missing ${missingTools.join(', ')}`));

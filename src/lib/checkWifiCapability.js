@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import { execSync } from 'node:child_process';
 import { logger } from '../utils/logger.js';
 
@@ -86,8 +87,21 @@ export function getWifiInterfaceName() {
       return match[1];
     }
   } catch {
-    // Fall back to default
+    // Fall back to reading /sys/class/net
   }
+
+  try {
+    if (fs.existsSync('/sys/class/net')) {
+      const entries = fs.readdirSync('/sys/class/net');
+      for (const entry of entries) {
+        if (entry.startsWith('ap') || entry.includes('_ap') || entry.startsWith('p2p-') || entry.startsWith('pan') || entry === 'lo') continue;
+        if (fs.existsSync(`/sys/class/net/${entry}/wireless`) || fs.existsSync(`/sys/class/net/${entry}/phy80211`)) {
+          return entry;
+        }
+      }
+    }
+  } catch {}
+
   return 'wlan0';
 }
 

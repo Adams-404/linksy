@@ -469,4 +469,64 @@ Linksy implements a multi-layer defense ensuring zero socket leakage across cras
    - `linksy off` evaluates `isHotspotRunning()`, `wifi.pid`, `wifi.pid.dnsmasq`, and physical sysfs interface presence (`/sys/class/net/ap0`).
    - `stopWifiHotspot()` runs `stop-hotspot.sh` and executes a direct sudo fallback block, guaranteeing interface deletion, iptables rule purging, and process termination even if static script files on disk were outdated.
 
+---
 
+## 14. Multi-Engine Wi-Fi Detection & Ubuntu/Debian `/usr/sbin` PATH Resolution (HP EliteBook & Intel Wireless-AC 9560)
+
+### 14.1 Symptom
+On Ubuntu and Debian systems (such as the HP EliteBook 840 G6, running under `ameenullah@ameenullah-HP-EliteBook-840-G6:~$`), running `linksy on --wifi` repeatedly fails with:
+```text
+✖ No active Wi-Fi connection detected on your laptop.
+ℹ To share internet via concurrent Wi-Fi hotspot, your laptop must be connected to a Wi-Fi network first.
+ℹ Linksy will match your hotspot to the same channel as your connection.
+```
+even when the laptop is actively connected to a Wi-Fi network with full internet browsing capabilities.
+
+### 14.2 Root Cause Analysis
+Four compounding factors caused this detection failure on Ubuntu/Debian and Intel wireless hardware:
+
+1. **Debian/Ubuntu Non-Root PATH Gap (`/usr/sbin` excluded)**:
+   By default, Debian and Ubuntu distributions exclude `/usr/sbin`, `/sbin`, and `/usr/local/sbin` from unprivileged users' `$PATH`. Low-level wireless binaries (`iw`, `hostapd`, `dnsmasq`) reside in `/usr/sbin/`. When Linksy invoked `execSync('iw dev')`, Node spawned a shell inheriting the user's `$PATH`, resulting in `command not found` (exit code 127), returning an empty string and failing silently.
+
+2. **Missing `iw` Package on OEM / Minimal Ubuntu Installations**:
+   Unlike Fedora, Arch, or standard desktop Ubuntu, minimal or corporate OEM Ubuntu installations (common on enterprise laptops like HP EliteBook 840 G6) do not include `iw` by default—relying entirely on NetworkManager (`nmcli` / D-Bus). Linksy's `ensureWifiDependencies()` previously checked for `hostapd` and `dnsmasq`, omitting `iw`.
+
+3. **Missing `channel` Keyword in `iw link` Output (Intel `iwlwifi`)**:
+   On Intel Wireless-AC 9560 / AX200 / AX210 hardware running `iwlwifi` under Linux kernels 5.x and 6.x, `iw dev <iface> link` reports:
+   ```text
+   Connected to 04:d9:f5:xx:xx:xx (on wlo1)
+   	SSID: Silicon_Rubi_Hotspot
+   	freq: 2437.0
+   	RX: 12345 bytes (89 packets)
+   ```
+   Crucially, `iw dev <iface> info` in managed mode often omits the `channel \d+` line entirely.
+   In `parseActiveWifiInfo()`, Linksy evaluated:
+   ```javascript
+   const connected = Boolean(channel !== null && (freq !== null || channel > 0));
+   ```
+   Because `channel` was `null` (only `freq: 2437.0` was present), `connected` evaluated to `false`! Linksy discarded the active connection even though frequency and SSID were known.
+
+4. **Single-Engine Detection Architecture**:
+   Linksy relied exclusively on `iw dev`. If `iw` was not installed, was not in `$PATH`, or encountered driver-specific formatting variations, Linksy had no fallback to NetworkManager (`nmcli`) or Linux sysfs (`/sys/class/net`).
+
+### 14.3 Multi-Engine Detection Architecture (Released in v1.5.3)
+Linksy v1.5.3 introduces a robust multi-engine discovery pipeline:
+
+1. **Universal Sbin PATH Injection**:
+   In `src/lib/paths.js`, `ensureSystemSbinInPath()` automatically appends `/usr/local/sbin`, `/usr/sbin`, and `/sbin` to `process.env.PATH` upon module load. Furthermore, both `start-hotspot.sh` and `stop-hotspot.sh` explicitly prepend `export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"` at the top of their generated bash scripts.
+
+2. **Bidirectional Frequency <-> Channel Derivation**:
+   `getChannelFromFrequency(freq)` and `getFrequencyFromChannel(channel)` handle bidirectional conversion across both 2.4 GHz (Channels 1–14, 2412–2484 MHz) and 5 GHz (Channels 32–177, 5160–5885 MHz).
+   `parseActiveWifiInfo()` automatically derives `channel` whenever `freq` is provided by `iw link`, ensuring Intel `iwlwifi` devices never fail connection detection.
+
+3. **Multi-Engine Discovery Pipeline (`getActiveWifiConnection`)**:
+   - **Engine 1 (`iw` + sysfs fallback)**: Queries `iw dev` and scans `/sys/class/net/*/wireless` and `/sys/class/net/*/phy80211` to identify physical adapters (e.g. `wlo1`, `wlp1s0`, `wlp0s20f3`), inspecting their active link status and radio frequencies.
+   - **Engine 2 (NetworkManager `nmcli` Cache)**: If `iw` returns no active connection, Linksy queries NetworkManager's internal cache via `nmcli -t -f IN-USE,SSID,CHAN,FREQ,DEVICE dev wifi list --rescan no` (~50ms latency). This extracts the active `*` in-use network, channel, frequency, and interface directly from NetworkManager.
+   - **Engine 3 (`nmcli dev` Status & Device Inspection)**: As a secondary NetworkManager fallback, checks `nmcli -t -f DEVICE,TYPE,STATE dev` for connected Wi-Fi devices and extracts connection metadata.
+
+4. **Automated `iw` Dependency Management**:
+   `isIwInstalled()` detects `iw` availability across `$PATH` and filesystem locations (`/usr/sbin/iw`, `/sbin/iw`, `/usr/bin/iw`). `ensureWifiDependencies()` auto-installs `iw` alongside `hostapd` and `dnsmasq` via APT, DNF, Pacman, or Zypper.
+
+5. **Enhanced Diagnostics & Disconnected Feedback**:
+   - `linksy doctor` verifies `iw`, `hostapd`, and `dnsmasq` together.
+   - If Wi-Fi is physically present but unassociated, `linksy on --wifi` identifies the specific adapter (e.g. `Detected Wi-Fi adapter: wlo1 (currently disconnected)`), clarifying the exact state for the user.

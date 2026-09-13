@@ -16,6 +16,7 @@ import {
 } from './paths.js';
 import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
+import { getWifiInterfaceName } from './checkWifiCapability.js';
 import { logger } from '../utils/logger.js';
 
 const PID_FILE = WIFI_PID_FILE;
@@ -98,7 +99,55 @@ export function getDefaultHotspotSsid() {
 }
 
 /**
+ * Converts a radio frequency in MHz to its standard 802.11 channel number.
+ * Supports 2.4 GHz (1-14) and 5 GHz (32-177).
+ * @param {number} freq
+ * @returns {number|null}
+ */
+export function getChannelFromFrequency(freq) {
+  if (!freq || typeof freq !== 'number' || isNaN(freq)) return null;
+  const rounded = Math.round(freq);
+
+  // 2.4 GHz: 2412 (Ch 1) to 2472 (Ch 13) spaced every 5 MHz
+  if (rounded >= 2412 && rounded <= 2472) {
+    return Math.round((rounded - 2407) / 5);
+  }
+  // 2.4 GHz: Channel 14 (Japan)
+  if (rounded === 2484) {
+    return 14;
+  }
+
+  // 5 GHz: 5160 MHz to 5885 MHz
+  if (rounded >= 5160 && rounded <= 5885) {
+    return Math.round((rounded - 5000) / 5);
+  }
+
+  return null;
+}
+
+/**
+ * Converts a channel number and band hint to frequency in MHz.
+ * @param {number} channel
+ * @param {'a'|'g'|'2.4'|'5'|null} bandHint
+ * @returns {number|null}
+ */
+export function getFrequencyFromChannel(channel, bandHint = null) {
+  if (!channel || typeof channel !== 'number' || isNaN(channel)) return null;
+
+  if (channel === 14) return 2484;
+  if (channel >= 1 && channel <= 13) {
+    return 2407 + (channel * 5);
+  }
+  if (channel >= 32 && channel <= 177) {
+    return 5000 + (channel * 5);
+  }
+
+  return null;
+}
+
+/**
  * Parses raw iw link and info text to extract active Wi-Fi connection parameters.
+ * Automatically derives channel from frequency (or frequency from channel) if either is omitted by driver/kernel.
  * @param {string} iwOutput
  * @returns {{ connected: boolean, channel: number|null, freq: number|null, hwMode: 'a'|'g'|null, ssid: string|null, width: number|null }}
  */
@@ -112,14 +161,23 @@ export function parseActiveWifiInfo(iwOutput) {
   const ssidMatch = iwOutput.match(/ssid[:\s]+([^\n\r]+)/i);
   const widthMatch = iwOutput.match(/width:\s*(\d+)\s*MHz/i);
 
-  const channel = channelMatch ? parseInt(channelMatch[1], 10) : null;
+  let channel = channelMatch ? parseInt(channelMatch[1], 10) : null;
   let freq = channelMatch && channelMatch[2] ? parseFloat(channelMatch[2]) : null;
   if (!freq && freqMatch) {
     freq = parseFloat(freqMatch[1]);
   }
 
+  // Derive channel from frequency if omitted by driver (common on Intel iwlwifi AC 9560 / AX200)
+  if (!channel && freq) {
+    channel = getChannelFromFrequency(freq);
+  }
+  // Derive frequency from channel if omitted
+  if (channel && !freq) {
+    freq = getFrequencyFromChannel(channel);
+  }
+
   const ssid = ssidMatch ? ssidMatch[1].trim() : null;
-  const connected = Boolean(channel !== null && (freq !== null || channel > 0));
+  const connected = Boolean((channel !== null && channel > 0) || (freq !== null && freq > 0));
   const width = connected ? (widthMatch ? parseInt(widthMatch[1], 10) : 20) : null;
   const hwMode = connected ? (freq ? (freq > 4000 ? 'a' : 'g') : (channel && channel > 14 ? 'a' : 'g')) : null;
 
@@ -134,23 +192,175 @@ export function parseActiveWifiInfo(iwOutput) {
 }
 
 /**
+ * Parses a single line from `nmcli -t -f IN-USE,SSID,CHAN,FREQ,DEVICE dev wifi list`.
+ * @param {string} line
+ * @returns {{ inUse: boolean, ssid: string, channel: number|null, freq: number|null, iface: string|null }|null}
+ */
+export function parseNmcliWifiLine(line) {
+  if (!line || typeof line !== 'string') return null;
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  const inUse = trimmed.startsWith('*');
+  const colonParts = trimmed.split(':');
+  if (colonParts.length < 5) return null;
+
+  const iface = colonParts[colonParts.length - 1].trim();
+  const rawFreq = colonParts[colonParts.length - 2].trim();
+  const rawChan = colonParts[colonParts.length - 3].trim();
+  const rawSsid = colonParts.slice(1, colonParts.length - 3).join(':').replace(/\\:/g, ':').trim();
+
+  const channel = parseInt(rawChan, 10);
+  const freqNum = parseFloat(rawFreq.replace(/[^0-9.]/g, ''));
+  const freq = !isNaN(freqNum) && freqNum > 0 ? freqNum : (channel ? getFrequencyFromChannel(channel) : null);
+  const finalChannel = !isNaN(channel) && channel > 0 ? channel : (freq ? getChannelFromFrequency(freq) : null);
+
+  return {
+    inUse,
+    ssid: rawSsid,
+    channel: finalChannel,
+    freq,
+    iface: iface || null
+  };
+}
+
+/**
+ * Queries NetworkManager via nmcli to detect the active Wi-Fi connection and its radio parameters.
+ * @returns {{ iface: string, ssid: string, channel: number, freq: number, hwMode: 'a'|'g', width: number }|null}
+ */
+export function getActiveWifiFromNmcli() {
+  try {
+    // Fast path: nmcli dev wifi list --rescan no queries NM internal cache (~50ms)
+    const wifiList = execSync('nmcli -t -f IN-USE,SSID,CHAN,FREQ,DEVICE dev wifi list --rescan no', {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+
+    const lines = wifiList.split('\n');
+    for (const line of lines) {
+      const parsed = parseNmcliWifiLine(line);
+      if (parsed && parsed.inUse && parsed.iface && parsed.channel) {
+        const hwMode = (parsed.freq && parsed.freq > 4000) || parsed.channel > 14 ? 'a' : 'g';
+        return {
+          iface: parsed.iface,
+          ssid: parsed.ssid || 'Wi-Fi Network',
+          channel: parsed.channel,
+          freq: parsed.freq || (parsed.channel <= 14 ? 2407 + (parsed.channel * 5) : 5000 + (parsed.channel * 5)),
+          hwMode,
+          width: 20
+        };
+      }
+    }
+  } catch {}
+
+  // Fallback: Check nmcli dev status for connected wifi interface
+  try {
+    const devStatus = execSync('nmcli -t -f DEVICE,TYPE,STATE dev', {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const devLines = devStatus.split('\n');
+    for (const line of devLines) {
+      const parts = line.split(':');
+      if (parts.length >= 3 && parts[1] === 'wifi' && parts[2] === 'connected') {
+        const dev = parts[0];
+        try {
+          const showOutput = execSync(`nmcli -t -f GENERAL.CONNECTION dev show ${dev}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore']
+          });
+          const connMatch = showOutput.match(/GENERAL\.CONNECTION:(.+)/);
+          const ssid = connMatch ? connMatch[1].trim() : 'Wi-Fi Network';
+
+          // Check if iw can get link info for this device
+          try {
+            const linkOutput = execSync(`iw dev ${dev} link`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+            const parsedLink = parseActiveWifiInfo(linkOutput);
+            if (parsedLink.channel) {
+              return {
+                iface: dev,
+                ssid: parsedLink.ssid || ssid,
+                channel: parsedLink.channel,
+                freq: parsedLink.freq,
+                hwMode: parsedLink.hwMode,
+                width: parsedLink.width || 20
+              };
+            }
+          } catch {}
+
+          // Query wifi list for this specific interface
+          const wifiListIface = execSync(`nmcli -t -f IN-USE,SSID,CHAN,FREQ,DEVICE dev wifi list ifname ${dev}`, {
+            encoding: 'utf8',
+            stdio: ['pipe', 'pipe', 'ignore']
+          });
+          for (const wLine of wifiListIface.split('\n')) {
+            const parsed = parseNmcliWifiLine(wLine);
+            if (parsed && parsed.inUse && parsed.channel) {
+              const hwMode = (parsed.freq && parsed.freq > 4000) || parsed.channel > 14 ? 'a' : 'g';
+              return {
+                iface: dev,
+                ssid: parsed.ssid || ssid,
+                channel: parsed.channel,
+                freq: parsed.freq || (parsed.channel <= 14 ? 2407 + (parsed.channel * 5) : 5000 + (parsed.channel * 5)),
+                hwMode,
+                width: 20
+              };
+            }
+          }
+        } catch {}
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+/**
  * Identifies the currently active/connected Wi-Fi interface and its radio parameters.
+ * Uses a multi-engine discovery pipeline:
+ * 1. Queries iw dev and sysfs (/sys/class/net) for wireless interfaces and inspects their link status.
+ * 2. Falls back to NetworkManager (nmcli) cache for instant detection across modern Linux desktops.
  * @returns {{ iface: string, ssid: string, channel: number, freq: number, hwMode: 'a'|'g', width: number }|null}
  */
 export function getActiveWifiConnection() {
   try {
-    const devOutput = execSync('iw dev', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-    const ifaceMatches = [...devOutput.matchAll(/Interface\s+([a-zA-Z0-9_-]+)/g)];
+    const candidateIfaces = [];
 
-    for (const match of ifaceMatches) {
-      const iface = match[1];
+    try {
+      const devOutput = execSync('iw dev', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+      const ifaceMatches = [...devOutput.matchAll(/Interface\s+([a-zA-Z0-9_-]+)/g)];
+      for (const match of ifaceMatches) {
+        candidateIfaces.push(match[1]);
+      }
+    } catch {}
+
+    // Augment candidate interfaces from /sys/class/net in case iw dev didn't find them
+    try {
+      if (fs.existsSync('/sys/class/net')) {
+        const entries = fs.readdirSync('/sys/class/net');
+        for (const entry of entries) {
+          if (entry.startsWith('ap') || entry.includes('_ap') || entry.startsWith('p2p-') || entry.startsWith('pan') || entry === 'lo') continue;
+          if (fs.existsSync(`/sys/class/net/${entry}/wireless`) || fs.existsSync(`/sys/class/net/${entry}/phy80211`)) {
+            if (!candidateIfaces.includes(entry)) {
+              candidateIfaces.push(entry);
+            }
+          }
+        }
+      }
+    } catch {}
+
+    for (const iface of candidateIfaces) {
       if (iface.startsWith('ap') || iface.includes('_ap') || iface.startsWith('p2p-')) {
         continue;
       }
 
       try {
         const linkOutput = execSync(`iw dev ${iface} link`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
-        const infoOutput = execSync(`iw dev ${iface} info`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+        let infoOutput = '';
+        try {
+          infoOutput = execSync(`iw dev ${iface} info`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+        } catch {}
+
         const combined = `${linkOutput}\n${infoOutput}`;
         const parsed = parseActiveWifiInfo(combined);
 
@@ -165,8 +375,15 @@ export function getActiveWifiConnection() {
       }
     }
   } catch (err) {
-    logger.debug(`getActiveWifiConnection failed: ${err.message}`);
+    logger.debug(`iw connection detection failed: ${err.message}`);
   }
+
+  // Engine 2: Fall back to NetworkManager
+  const nmcliResult = getActiveWifiFromNmcli();
+  if (nmcliResult) {
+    return nmcliResult;
+  }
+
   return null;
 }
 
@@ -179,7 +396,7 @@ export function isHostapdInstalled() {
     execSync('command -v hostapd', { stdio: 'ignore' });
     return true;
   } catch {
-    return fs.existsSync('/usr/sbin/hostapd') || fs.existsSync('/usr/bin/hostapd');
+    return fs.existsSync('/usr/sbin/hostapd') || fs.existsSync('/sbin/hostapd') || fs.existsSync('/usr/bin/hostapd');
   }
 }
 
@@ -192,7 +409,20 @@ export function isDnsmasqInstalled() {
     execSync('command -v dnsmasq', { stdio: 'ignore' });
     return true;
   } catch {
-    return fs.existsSync('/usr/sbin/dnsmasq') || fs.existsSync('/usr/bin/dnsmasq');
+    return fs.existsSync('/usr/sbin/dnsmasq') || fs.existsSync('/sbin/dnsmasq') || fs.existsSync('/usr/bin/dnsmasq');
+  }
+}
+
+/**
+ * Checks if iw binary is available.
+ * @returns {boolean}
+ */
+export function isIwInstalled() {
+  try {
+    execSync('command -v iw', { stdio: 'ignore' });
+    return true;
+  } catch {
+    return fs.existsSync('/usr/sbin/iw') || fs.existsSync('/sbin/iw') || fs.existsSync('/usr/bin/iw') || fs.existsSync('/bin/iw');
   }
 }
 
@@ -552,11 +782,12 @@ export function isHotspotRunning() {
 }
 
 /**
- * Ensures required packages (hostapd, dnsmasq) are installed, auto-installing if missing.
+ * Ensures required packages (iw, hostapd, dnsmasq) are installed, auto-installing if missing.
  * @returns {boolean}
  */
 export function ensureWifiDependencies() {
   const missing = [];
+  if (!isIwInstalled()) missing.push('iw');
   if (!isHostapdInstalled()) missing.push('hostapd');
   if (!isDnsmasqInstalled()) missing.push('dnsmasq');
 
@@ -599,10 +830,11 @@ export function ensureWifiDependencies() {
       return false;
     }
 
+    const iwReady = !missing.includes('iw') || isIwInstalled();
     const hostapdReady = !missing.includes('hostapd') || isHostapdInstalled();
     const dnsmasqReady = !missing.includes('dnsmasq') || isDnsmasqInstalled();
 
-    if (hostapdReady && dnsmasqReady) {
+    if (iwReady && hostapdReady && dnsmasqReady) {
       logger.success(`Successfully installed ${missing.join(', ')}!`);
       return true;
     } else {
@@ -621,6 +853,7 @@ export function ensureWifiDependencies() {
 export function generateStartScript({ activeWifi, apIface, adminGroup }) {
   return `#!/usr/bin/env bash
 set -e
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
 IFACE="${activeWifi.iface}"
 AP_IFACE="${apIface}"
 CONF="${WIFI_CONFIG_FILE}"
@@ -744,6 +977,7 @@ dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
  */
 export function generateStopScript({ iface, apIface }) {
   return `#!/usr/bin/env bash
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
 IFACE="${iface}"
 AP_IFACE="${apIface}"
 PID_FILE="${WIFI_PID_FILE}"
@@ -890,6 +1124,10 @@ export async function startWifiHotspot(options = {}) {
   let activeWifi = getActiveWifiConnection();
   if (!activeWifi) {
     logger.error('No active Wi-Fi connection detected on your laptop.');
+    const ifaceName = getWifiInterfaceName();
+    if (ifaceName && ifaceName !== 'wlan0') {
+      logger.info(`Detected Wi-Fi adapter: ${chalk.cyan(ifaceName)} (currently disconnected or unassociated).`);
+    }
     logger.info('To share internet via concurrent Wi-Fi hotspot, your laptop must be connected to a Wi-Fi network first.');
     logger.info('Linksy will match your hotspot to the same channel as your connection.');
     process.exit(1);

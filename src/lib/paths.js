@@ -23,3 +23,17 @@ export const BT_LOG_FILE = path.join(LINKSY_DIR, 'bluetooth.log');
 
 export const CONFIG_FILE = path.join(LINKSY_DIR, 'config.json');
 export const UPDATE_CHECK_FILE = path.join(LINKSY_DIR, 'update-check.json');
+
+// Ensure system sbin directories (/usr/local/sbin, /usr/sbin, /sbin) are in process.env.PATH
+// so commands like iw, hostapd, and dnsmasq can be located by unprivileged users on Debian/Ubuntu.
+export function ensureSystemSbinInPath() {
+  const currentPath = process.env.PATH || '';
+  const sbinDirs = ['/usr/local/sbin', '/usr/sbin', '/sbin'];
+  const existing = currentPath.split(':');
+  const missingSbin = sbinDirs.filter(d => !existing.includes(d));
+  if (missingSbin.length > 0) {
+    process.env.PATH = `${currentPath}:${missingSbin.join(':')}`;
+  }
+}
+ensureSystemSbinInPath();
+
