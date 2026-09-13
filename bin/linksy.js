@@ -73,13 +73,19 @@ program
   .option('-s, --ssid <name>', 'Custom Wi-Fi hotspot SSID (saved as default)')
   .option('-n, --name <name>', 'Custom Wi-Fi hotspot name (alias for --ssid, saved as default)')
   .option('-p, --password <pass>', 'Custom Wi-Fi hotspot password (saved as default)')
+  .option('-B, --band <band>', 'Select Wi-Fi frequency band: 2.4, 5, or auto')
+  .option('--2ghz', 'Force 2.4 GHz frequency band')
+  .option('--5ghz', 'Force 5 GHz frequency band')
+  .option('--no-auto-band', 'Disable automatic regional regulatory band switching')
   .option('--no-password', 'Disable Wi-Fi password (create an open hotspot)')
   .option('--open', 'Alias for --no-password')
   .option('-f, --foreground', 'Run Gnirehtet in foreground instead of detached background')
   .addHelpText('after', `
 Examples:
   $ linksy on                           # Start reverse tethering over USB cable
-  $ linksy on --wifi                    # Start Wi-Fi hotspot (wireless, uses saved password)
+  $ linksy on --wifi                    # Start Wi-Fi hotspot (auto-matches or fixes channel for mobile)
+  $ linksy on --wifi --band 2.4         # Force 2.4 GHz band for maximum phone compatibility
+  $ linksy on --wifi --band 5           # Force 5 GHz band
   $ linksy on --wifi --name "MyHotspot" # Set custom hotspot name and start
   $ linksy on --wifi -p <password>      # Change hotspot password and start
   $ linksy on --wifi -s "MyWifi" -p <password> # Change SSID & password and start

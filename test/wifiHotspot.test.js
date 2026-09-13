@@ -4,7 +4,11 @@ import {
   generateHostapdConfig,
   getWifiHotspotStatus,
   getDefaultHotspotSsid,
-  generateApMac
+  generateApMac,
+  parseRegulatoryBands,
+  isChannelCompatibleWithRegion,
+  normalizeBand,
+  getSystemCountryFallback
 } from '../src/lib/wifiHotspot.js';
 
 describe('wifiHotspot - parseActiveWifiInfo', () => {
@@ -193,3 +197,105 @@ describe('wifiHotspot - generateApMac', () => {
     expect(generateApMac('00:11:22:33:44')).toBeNull();
   });
 });
+
+describe('wifiHotspot - parseRegulatoryBands', () => {
+  it('parses country code and frequency ranges from iw reg get output', () => {
+    const raw = `
+global
+country NG: DFS-ETSI
+	(2402 - 2482 @ 40), (N/A, 20), (N/A)
+	(5250 - 5330 @ 80), (N/A, 30), (0 ms), DFS
+	(5735 - 5835 @ 80), (N/A, 30), (N/A)
+    `;
+
+    const parsed = parseRegulatoryBands(raw);
+    expect(parsed.country).toBe('NG');
+    expect(parsed.ranges).toHaveLength(3);
+    expect(parsed.ranges[0]).toEqual({ start: 2402, end: 2482, bw: 40 });
+    expect(parsed.ranges[1]).toEqual({ start: 5250, end: 5330, bw: 80 });
+    expect(parsed.ranges[2]).toEqual({ start: 5735, end: 5835, bw: 80 });
+  });
+
+  it('handles empty or malformed output gracefully', () => {
+    expect(parseRegulatoryBands('')).toEqual({ country: null, ranges: [] });
+    expect(parseRegulatoryBands(null)).toEqual({ country: null, ranges: [] });
+  });
+});
+
+describe('wifiHotspot - isChannelCompatibleWithRegion', () => {
+  it('permits 2.4 GHz channels 1 through 13 in Nigeria (NG)', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 6, freq: 2437, countryCode: 'NG' });
+    expect(res.compatible).toBe(true);
+    expect(res.band).toBe('2.4GHz');
+  });
+
+  it('permits 5 GHz Channel 149 in Nigeria (5.8 GHz Band 4 is allowed)', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 149, freq: 5745, countryCode: 'NG' });
+    expect(res.compatible).toBe(true);
+    expect(res.band).toBe('5GHz');
+  });
+
+  it('permits 5 GHz Channel 52 (DFS) in Nigeria', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 52, freq: 5260, countryCode: 'NG' });
+    expect(res.compatible).toBe(true);
+    expect(res.band).toBe('5GHz');
+  });
+
+  it('rejects 5 GHz Channel 48 in Nigeria (restricted for mobile devices under NCC/ETSI rules)', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 48, freq: 5240, countryCode: 'NG' });
+    expect(res.compatible).toBe(false);
+    expect(res.country).toBe('NG');
+    expect(res.reason).toContain('restricted in Nigeria (NG)');
+  });
+
+  it('rejects 5 GHz Channel 36 in Nigeria', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 36, freq: 5180, countryCode: 'NG' });
+    expect(res.compatible).toBe(false);
+    expect(res.country).toBe('NG');
+  });
+
+  it('rejects 5 GHz Channel 100 in Nigeria', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 100, freq: 5500, countryCode: 'NG' });
+    expect(res.compatible).toBe(false);
+    expect(res.country).toBe('NG');
+  });
+
+  it('allows 5 GHz Channel 48 in the US', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 48, freq: 5240, countryCode: 'US' });
+    expect(res.compatible).toBe(true);
+  });
+
+  it('rejects Channel 14 outside Japan', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 14, freq: 2484, countryCode: 'US' });
+    expect(res.compatible).toBe(false);
+    expect(res.reason).toContain('Japan');
+  });
+
+  it('allows Channel 14 in Japan', () => {
+    const res = isChannelCompatibleWithRegion({ channel: 14, freq: 2484, countryCode: 'JP' });
+    expect(res.compatible).toBe(true);
+  });
+});
+
+describe('wifiHotspot - normalizeBand', () => {
+  it('normalizes 2.4 GHz variants', () => {
+    expect(normalizeBand('2.4')).toBe('2.4');
+    expect(normalizeBand('2.4GHz')).toBe('2.4');
+    expect(normalizeBand('2g')).toBe('2.4');
+    expect(normalizeBand('bg')).toBe('2.4');
+  });
+
+  it('normalizes 5 GHz variants', () => {
+    expect(normalizeBand('5')).toBe('5');
+    expect(normalizeBand('5ghz')).toBe('5');
+    expect(normalizeBand('5G')).toBe('5');
+    expect(normalizeBand('a')).toBe('5');
+  });
+
+  it('returns null for invalid or null band', () => {
+    expect(normalizeBand(null)).toBeNull();
+    expect(normalizeBand('auto')).toBeNull();
+    expect(normalizeBand('invalid')).toBeNull();
+  });
+});
+

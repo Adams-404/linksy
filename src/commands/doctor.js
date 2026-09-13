@@ -4,7 +4,12 @@ import { GNIREHTET_BIN } from '../lib/paths.js';
 import { isAdbInstalled, getAdbVersion } from '../lib/installAdb.js';
 import { checkDeviceStatus } from '../lib/adbHelpers.js';
 import { checkWifiCapability } from '../lib/checkWifiCapability.js';
-import { isHostapdInstalled, isDnsmasqInstalled, getActiveWifiConnection } from '../lib/wifiHotspot.js';
+import {
+  isHostapdInstalled,
+  isDnsmasqInstalled,
+  getActiveWifiConnection,
+  isChannelCompatibleWithRegion
+} from '../lib/wifiHotspot.js';
 import { checkBluetoothAvailability } from '../lib/bluetoothPan.js';
 import { getCliVersion, checkForUpdates } from '../lib/updateNotifier.js';
 import { logger } from '../utils/logger.js';
@@ -126,7 +131,13 @@ export async function doctorCommand() {
   }
 
   if (activeWifi) {
-    console.log(chalk.green('✔') + ' ' + chalk.bold('Active Wi-Fi Link:    ') + chalk.dim(` Connected to ${activeWifi.ssid || 'network'} (Ch ${activeWifi.channel}, ${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'})`));
+    const compat = isChannelCompatibleWithRegion({ channel: activeWifi.channel, freq: activeWifi.freq });
+    if (compat.compatible) {
+      console.log(chalk.green('✔') + ' ' + chalk.bold('Active Wi-Fi Link:    ') + chalk.dim(` Connected to ${activeWifi.ssid || 'network'} (Ch ${activeWifi.channel}, ${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'}${compat.country ? `, region ${compat.country}` : ''})`));
+    } else {
+      console.log(chalk.yellow('⚠') + ' ' + chalk.bold('Active Wi-Fi Link:    ') + chalk.yellow(` Connected on Ch ${activeWifi.channel} (${compat.reason})`));
+      console.log(chalk.dim(`  ↳ Linksy will auto-switch to 2.4 GHz when starting the hotspot, or run: linksy on --wifi --band 2.4\n`));
+    }
   } else {
     console.log(chalk.yellow('○') + ' ' + chalk.bold('Active Wi-Fi Link:    ') + chalk.dim(' Not connected to any Wi-Fi network currently'));
   }

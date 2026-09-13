@@ -202,9 +202,215 @@ export function getRegulatoryCountry() {
   try {
     const output = execSync('iw reg get', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
     const match = output.match(/country\s+([A-Z]{2})/);
-    if (match) return match[1];
+    if (match) return match[1].toUpperCase();
   } catch {}
   return null;
+}
+
+/**
+ * Parses raw iw reg get output into country code and list of authorized frequency ranges.
+ * @param {string} output
+ * @returns {{ country: string|null, ranges: Array<{ start: number, end: number, bw: number }> }}
+ */
+export function parseRegulatoryBands(output) {
+  if (!output || typeof output !== 'string') {
+    return { country: null, ranges: [] };
+  }
+
+  const countryMatch = output.match(/country\s+([A-Z]{2})/i);
+  const country = countryMatch ? countryMatch[1].toUpperCase() : null;
+
+  const ranges = [];
+  const rangeRegex = /\(\s*(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)\s*@\s*(\d+(?:\.\d+)?)\s*\)/g;
+  let match;
+  while ((match = rangeRegex.exec(output)) !== null) {
+    ranges.push({
+      start: parseFloat(match[1]),
+      end: parseFloat(match[2]),
+      bw: parseFloat(match[3])
+    });
+  }
+
+  return { country, ranges };
+}
+
+/**
+ * Returns fallback country code based on system timezone / locale.
+ * @returns {string|null}
+ */
+export function getSystemCountryFallback() {
+  try {
+    const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || '';
+    if (tz.includes('Lagos') || tz.includes('Nigeria')) return 'NG';
+    if (tz.includes('London') || tz.includes('Dublin')) return 'GB';
+    if (tz.includes('New_York') || tz.includes('Chicago') || tz.includes('Los_Angeles')) return 'US';
+    if (tz.includes('Tokyo')) return 'JP';
+    if (tz.includes('Berlin') || tz.includes('Paris')) return 'DE';
+  } catch {}
+  return null;
+}
+
+/**
+ * Retrieves regulatory information including detected country and authorized bands.
+ * @returns {{ country: string|null, ranges: Array<{ start: number, end: number, bw: number }> }}
+ */
+export function getRegulatoryInfo() {
+  try {
+    const output = execSync('iw reg get', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    const parsed = parseRegulatoryBands(output);
+    if (!parsed.country) {
+      parsed.country = getSystemCountryFallback();
+    }
+    return parsed;
+  } catch {
+    return { country: getSystemCountryFallback(), ranges: [] };
+  }
+}
+
+/**
+ * Evaluates whether a Wi-Fi channel and frequency are authorized and detectable by mobile clients
+ * in the current regulatory region (with special handling for Nigeria / NCC / ETSI restrictions).
+ * @param {{ channel: number, freq?: number, countryCode?: string, regRanges?: Array<{ start: number, end: number }> }} params
+ * @returns {{ compatible: boolean, country: string|null, band: '2.4GHz'|'5GHz', reason?: string }}
+ */
+export function isChannelCompatibleWithRegion({
+  channel,
+  freq = null,
+  countryCode = null,
+  regRanges = null
+}) {
+  const code = (countryCode || getRegulatoryCountry() || getSystemCountryFallback() || '').toUpperCase();
+
+  // 2.4 GHz channels 1 through 13 are universally supported across all jurisdictions
+  if (channel >= 1 && channel <= 13) {
+    return { compatible: true, country: code, band: '2.4GHz' };
+  }
+
+  // Channel 14 is legally permitted only in Japan
+  if (channel === 14) {
+    return {
+      compatible: code === 'JP',
+      country: code,
+      band: '2.4GHz',
+      reason: 'Channel 14 is only legally authorized in Japan.'
+    };
+  }
+
+  // Nigeria (NG) mobile regulatory restrictions:
+  // Under NCC / ETSI frequency allocations and carrier SIM MCC 621 rules,
+  // Android and iOS devices restrict/disable scanning on U-NII-1 (channels 36-48)
+  // and U-NII-2C (channels 100-144).
+  // Only 2.4 GHz (channels 1-13), 5.2 GHz DFS (channels 52-64), and 5.8 GHz (channels 149-165)
+  // are scanned and joinable by mobile devices.
+  if (code === 'NG') {
+    if ((channel >= 36 && channel <= 48) || (channel >= 100 && channel <= 144)) {
+      return {
+        compatible: false,
+        country: 'NG',
+        band: '5GHz',
+        reason: `5 GHz Channel ${channel} (${freq ? `${freq} MHz` : 'U-NII-1/2C'}) is restricted in Nigeria (NG). Mobile devices with Nigerian SIM cards disable this frequency band.`
+      };
+    }
+  }
+
+  // General check against regulatory ranges from iw reg get if available
+  const ranges = regRanges || (code ? getRegulatoryInfo().ranges : []);
+  if (Array.isArray(ranges) && ranges.length > 0 && freq) {
+    const inRange = ranges.some(r => freq >= r.start && freq <= r.end);
+    if (!inRange) {
+      return {
+        compatible: false,
+        country: code || 'UNKNOWN',
+        band: freq > 4000 ? '5GHz' : '2.4GHz',
+        reason: `Frequency ${freq} MHz (Channel ${channel}) falls outside authorized regulatory ranges for country ${code || 'local'}.`
+      };
+    }
+  }
+
+  return {
+    compatible: true,
+    country: code || null,
+    band: (channel > 14 || (freq && freq > 4000)) ? '5GHz' : '2.4GHz'
+  };
+}
+
+/**
+ * Normalizes user-supplied band string to '2.4', '5', or null.
+ * @param {string|number|null} band
+ * @returns {'2.4'|'5'|null}
+ */
+export function normalizeBand(band) {
+  if (!band) return null;
+  const b = String(band).toLowerCase().trim();
+  if (['2.4', '2.4ghz', '2', '2g', 'bg', 'g', 'b'].includes(b)) return '2.4';
+  if (['5', '5ghz', '5g', 'a', 'ac', 'ax'].includes(b)) return '5';
+  return null;
+}
+
+/**
+ * Switches the active NetworkManager Wi-Fi connection to a specified frequency band (2.4 GHz or 5 GHz).
+ * Uses nmcli to configure 802-11-wireless.band and re-activates the connection.
+ * @param {string} iface - Network interface name (e.g. wlp0s20f3)
+ * @param {{ ssid: string }} activeWifi - Active connection details
+ * @param {'2.4'|'5'|'auto'} targetBand - Desired band ('2.4'/'bg', '5'/'a', or 'auto'/'')
+ * @returns {{ iface: string, ssid: string, channel: number, freq: number, hwMode: 'a'|'g', width: number }|null}
+ */
+export function switchWifiBand(iface, activeWifi, targetBand = '2.4') {
+  try {
+    const norm = normalizeBand(targetBand);
+    const bandParam = norm === '2.4' ? 'bg' : norm === '5' ? 'a' : '';
+
+    let connectionName = null;
+    try {
+      const connOutput = execSync('nmcli -t -f NAME,DEVICE connection show --active', {
+        encoding: 'utf8',
+        stdio: ['pipe', 'pipe', 'ignore']
+      });
+      for (const line of connOutput.trim().split('\n')) {
+        const parts = line.split(':');
+        if (parts[1] === iface) {
+          connectionName = parts[0];
+          break;
+        }
+      }
+    } catch {}
+
+    if (!connectionName && activeWifi?.ssid) {
+      connectionName = activeWifi.ssid;
+    }
+
+    if (!connectionName) {
+      throw new Error(`Could not determine active NetworkManager connection name for interface ${iface}`);
+    }
+
+    // Set 802-11-wireless.band and clear hardcoded bssid to allow roaming across bands
+    execSync(`nmcli connection modify "${connectionName}" 802-11-wireless.band "${bandParam}" 802-11-wireless.bssid ""`, {
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+
+    // Re-activate connection so NetworkManager associates with the requested band
+    execSync(`nmcli connection up "${connectionName}"`, {
+      stdio: ['pipe', 'pipe', 'ignore'],
+      timeout: 15000
+    });
+
+    // Wait up to 6 seconds for interface link and IP renewal
+    const start = Date.now();
+    let updated = null;
+    while (Date.now() - start < 6000) {
+      updated = getActiveWifiConnection();
+      if (updated && updated.channel) {
+        if (norm === '2.4' && updated.channel <= 14) break;
+        if (norm === '5' && updated.channel > 14) break;
+      }
+      try { execSync('sleep 0.5'); } catch {}
+    }
+
+    return updated || getActiveWifiConnection();
+  } catch (err) {
+    logger.debug(`switchWifiBand failed: ${err.message}`);
+    throw err;
+  }
 }
 
 /**
@@ -418,9 +624,26 @@ export async function startWifiHotspot(options = {}) {
     options.noPassword !== undefined ||
     options.open !== undefined;
 
+  const explicitBand = normalizeBand(options.band || (options['2ghz'] ? '2.4' : options['5ghz'] ? '5' : null));
+  const autoBand = options.autoBand !== false;
+
+  const currentStatus = getWifiHotspotStatus();
+  const currentCompat = currentStatus.channel ? isChannelCompatibleWithRegion({ channel: currentStatus.channel }) : { compatible: true };
+
   if (isHotspotRunning()) {
-    if (hasCredentialChange) {
-      logger.info('Hotspot is currently active. Updating credentials and restarting hotspot...');
+    const needsBandChange = (explicitBand === '2.4' && currentStatus.channel && currentStatus.channel > 14) ||
+      (explicitBand === '5' && currentStatus.channel && currentStatus.channel <= 14) ||
+      (!explicitBand && autoBand && !currentCompat.compatible);
+
+    if (hasCredentialChange || needsBandChange || options.restart) {
+      if (!currentCompat.compatible && !explicitBand) {
+        logger.warn(`Active hotspot is currently running on restricted Channel ${currentStatus.channel} for region ${currentCompat.country || 'local'}.`);
+        logger.info('Restarting hotspot on a mobile-compatible frequency band...');
+      } else if (needsBandChange) {
+        logger.info(`Switching active hotspot band to ${explicitBand} GHz...`);
+      } else {
+        logger.info('Hotspot is currently active. Updating credentials and restarting hotspot...');
+      }
       stopWifiHotspot();
       await new Promise(resolve => setTimeout(resolve, 1000));
     } else {
@@ -470,12 +693,63 @@ export async function startWifiHotspot(options = {}) {
     process.exit(1);
   }
 
-  const activeWifi = getActiveWifiConnection();
+  let activeWifi = getActiveWifiConnection();
   if (!activeWifi) {
     logger.error('No active Wi-Fi connection detected on your laptop.');
     logger.info('To share internet via concurrent Wi-Fi hotspot, your laptop must be connected to a Wi-Fi network first.');
     logger.info('Linksy will match your hotspot to the same channel as your connection.');
     process.exit(1);
+  }
+
+  // Automatic Regulatory Domain & Regional Frequency Compatibility Check
+  const compatCheck = isChannelCompatibleWithRegion({
+    channel: activeWifi.channel,
+    freq: activeWifi.freq
+  });
+
+  const shouldSwitchTo24 = (explicitBand === '2.4' && activeWifi.hwMode === 'a') ||
+    (!explicitBand && autoBand && !compatCheck.compatible);
+  const shouldSwitchTo5 = (explicitBand === '5' && activeWifi.hwMode === 'g');
+
+  if (shouldSwitchTo24) {
+    if (!compatCheck.compatible && !explicitBand) {
+      logger.warn(chalk.yellow(`Regulatory domain check [${compatCheck.country || 'LOCAL'}]: ${compatCheck.reason}`));
+      logger.info(`Automatically switching laptop Wi-Fi for "${chalk.green(activeWifi.ssid)}" to 2.4 GHz so phones can connect...`);
+    } else {
+      logger.info(`Switching upstream Wi-Fi connection to 2.4 GHz as requested...`);
+    }
+
+    try {
+      try {
+        execSync('hostapd_cli -p /run/hostapd disable', { stdio: 'ignore' });
+      } catch {}
+
+      const switched = switchWifiBand(activeWifi.iface, activeWifi, '2.4');
+      if (switched && switched.connected) {
+        activeWifi = switched;
+        logger.success(`Upstream Wi-Fi adjusted to Channel ${chalk.cyan(activeWifi.channel)} (${activeWifi.freq ? `${activeWifi.freq} MHz, ` : ''}2.4 GHz).`);
+      } else {
+        logger.warn('Could not confirm 2.4 GHz switch from interface. Continuing on current channel.');
+      }
+    } catch (err) {
+      logger.warn(`Could not automatically switch to 2.4 GHz band: ${err.message}`);
+      logger.info('Proceeding with current channel. You can manually connect to a 2.4 GHz network or use USB tethering if mobile scanning fails.');
+    }
+  } else if (shouldSwitchTo5) {
+    logger.info(`Switching upstream Wi-Fi connection to 5 GHz as requested...`);
+    try {
+      try {
+        execSync('hostapd_cli -p /run/hostapd disable', { stdio: 'ignore' });
+      } catch {}
+
+      const switched = switchWifiBand(activeWifi.iface, activeWifi, '5');
+      if (switched && switched.connected) {
+        activeWifi = switched;
+        logger.success(`Upstream Wi-Fi adjusted to Channel ${chalk.cyan(activeWifi.channel)} (${activeWifi.freq ? `${activeWifi.freq} MHz, ` : ''}5 GHz).`);
+      }
+    } catch (err) {
+      logger.warn(`Could not switch to 5 GHz band: ${err.message}`);
+    }
   }
 
   logger.info(`Detected active Wi-Fi: ${chalk.green(activeWifi.ssid || 'connected')} on ${chalk.cyan(activeWifi.iface)}`);

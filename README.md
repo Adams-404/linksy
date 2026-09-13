@@ -15,7 +15,7 @@
 Most laptop Wi-Fi cards cannot run in standard hotspot mode while connected to a Wi-Fi network. In practice, activating an `nmcli` or GUI hotspot drops the laptop's existing wireless connection.
 
 **Linksy PhoneNet** solves this by providing three simple, automated reverse tethering methods:
-1. **Wireless Concurrent Wi-Fi Hotspot (`linksy on --wifi`)**: On dual-interface-capable Wi-Fi cards, Linksy automatically clones your upstream Wi-Fi frequency and channel into an independent virtual Access Point (`ap0`) with zero connection drops, automatic DHCP, and real-time device management.
+1. **Wireless Concurrent Wi-Fi Hotspot (`linksy on --wifi`)**: On dual-interface-capable Wi-Fi cards, Linksy automatically clones your upstream Wi-Fi frequency and channel into an independent virtual Access Point (`ap0`) with zero connection drops, automatic DHCP, and real-time device management. Includes **Intelligent Regional Auto-Detection** (e.g. Nigeria NCC/ETSI compliance): if your upstream Wi-Fi operates on a channel restricted from mobile phone scanning (like 5 GHz Channels 36–48 in Nigeria), Linksy automatically switches your connection to the 2.4 GHz band so your phone can detect the hotspot instantly!
 2. **Wireless Bluetooth Reverse Tethering (`linksy on --bluetooth`)**: Broadcasts a Bluetooth PAN Network Access Point (NAP) bridge that provides wireless reverse tethering without radio conflicts.
 3. **Wired Reverse USB Tethering (`linksy on`)**: Wraps `adb` and `gnirehtet` into a friendly, single-command experience that tunnels internet traffic through a USB cable without root.
 
@@ -71,7 +71,7 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 ### Subcommands (`phonenet` or `linksy-phonenet`)
 | Command | Description |
 | :--- | :--- |
-| `linksy on` | Start reverse tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-n` / `--name <name>`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `--no-password`) |
+| `linksy on` | Start reverse tethering (options: `-w` / `--wifi`, `-b` / `--bluetooth`, `-n` / `--name <name>`, `-s` / `--ssid <name>`, `-p` / `--password <pass>`, `-B` / `--band <2.4\|5>`, `--2ghz`, `--5ghz`, `--no-password`) |
 | `linksy off` | Stop all active tethering and hotspot services |
 | `linksy status` | Display status of USB, Wi-Fi hotspot, connected devices, and Bluetooth sessions |
 | `linksy qr` | Display a scannable Wi-Fi QR code in the terminal for instant phone connection (options: `-s`, `-p`, `--open`) |
@@ -88,9 +88,17 @@ You can connect your phone using **Wi-Fi Hotspot (Wireless)**, **Bluetooth (Wire
 
 #### 1. Wirelessly via Wi-Fi Hotspot (High Speed, No Cable)
 ```bash
-# Start concurrent Wi-Fi hotspot on the matching channel
+# Start concurrent Wi-Fi hotspot on matching channel (with automatic regional mobile compatibility!)
 # Automatically uses your laptop model (e.g. "Linksy-ThinkPad-T490s") to prevent room collisions!
 linksy on --wifi
+
+# Force 2.4 GHz band for 100% universal phone compatibility:
+linksy on --wifi --band 2.4
+# Or shorthand:
+linksy on -w --2ghz
+
+# Force 5 GHz band:
+linksy on --wifi --band 5
 
 # View your current hotspot name anytime:
 linksy name

@@ -13,8 +13,21 @@ try {
   const bluetooth = process.argv.includes('-b') || process.argv.includes('--bluetooth');
   const password = getArg('--password', '-p');
   const ssid = getArg('--ssid', '-s');
+  const band = getArg('--band', '-B');
+  const force2Ghz = process.argv.includes('--2ghz');
+  const force5Ghz = process.argv.includes('--5ghz');
+  const autoBand = !process.argv.includes('--no-auto-band');
   const noPassword = process.argv.includes('--no-password') || process.argv.includes('--open');
-  await onCommand({ foreground, wifi, bluetooth, password, ssid, noPassword });
+  await onCommand({
+    foreground,
+    wifi,
+    bluetooth,
+    password,
+    ssid,
+    band: force2Ghz ? '2.4' : force5Ghz ? '5' : band,
+    autoBand,
+    noPassword
+  });
 } catch (err) {
   logger.error(`Failed to start tethering: ${err.message}`, err);
   process.exit(1);
