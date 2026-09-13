@@ -12,7 +12,12 @@ export async function offCommand() {
   let stoppedAny = false;
 
   // 1. Check and stop Wi-Fi hotspot
-  if (isHotspotRunning() || fs.existsSync(WIFI_PID_FILE)) {
+  const hasWifiHotspot = isHotspotRunning() ||
+    fs.existsSync(WIFI_PID_FILE) ||
+    fs.existsSync(`${WIFI_PID_FILE}.dnsmasq`) ||
+    fs.existsSync('/sys/class/net/ap0');
+
+  if (hasWifiHotspot) {
     logger.info('Stopping Wi-Fi hotspot...');
     stopWifiHotspot();
     stoppedAny = true;

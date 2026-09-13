@@ -516,23 +516,36 @@ export function generateHostapdConfig({
  * @returns {boolean}
  */
 export function isHotspotRunning() {
-  if (!fs.existsSync(WIFI_PID_FILE)) {
-    return false;
-  }
-  try {
-    const rawPid = fs.readFileSync(WIFI_PID_FILE, 'utf8').trim();
-    const pid = parseInt(rawPid, 10);
-    if (!isNaN(pid) && pid > 0) {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch (err) {
-        return err.code === 'EPERM';
+  if (fs.existsSync(WIFI_PID_FILE)) {
+    try {
+      const rawPid = fs.readFileSync(WIFI_PID_FILE, 'utf8').trim();
+      const pid = parseInt(rawPid, 10);
+      if (!isNaN(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (err) {
+          if (err.code === 'EPERM') return true;
+        }
       }
-    }
-  } catch {
-    // Process not running
+    } catch {}
   }
+
+  if (fs.existsSync(`${WIFI_PID_FILE}.dnsmasq`)) {
+    try {
+      const rawPid = fs.readFileSync(`${WIFI_PID_FILE}.dnsmasq`, 'utf8').trim();
+      const pid = parseInt(rawPid, 10);
+      if (!isNaN(pid) && pid > 0) {
+        try {
+          process.kill(pid, 0);
+          return true;
+        } catch (err) {
+          if (err.code === 'EPERM') return true;
+        }
+      }
+    } catch {}
+  }
+
   return false;
 }
 
@@ -809,7 +822,20 @@ mkdir -p /run/hostapd
 chgrp "$ADMIN_GROUP" /run/hostapd 2>/dev/null || true
 chmod 775 /run/hostapd 2>/dev/null || true
 
-# 1. Clean up stale ap interface if existing
+# 1. Clean up stale ap interface and lingering daemon processes if existing
+if [ -f "${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "${PID_FILE}.dnsmasq"
+fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+
+if [ -f "$PID_FILE" ]; then
+  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
+  rm -f "$PID_FILE"
+fi
+killall -9 hostapd 2>/dev/null || true
+
 iw dev "$AP_IFACE" del 2>/dev/null || true
 
 # 2. Add virtual AP interface
@@ -845,7 +871,7 @@ fi
 # Apply any blacklist drop rules
 if [ -f "$DENY_FILE" ]; then
   while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\r\n ')
+    mac=$(echo "$mac" | tr -d '\\r\\n ')
     if [ -n "$mac" ]; then
       iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
       iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
@@ -859,7 +885,7 @@ iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
+iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
 # 6. Start hostapd in daemon mode with PID file
@@ -871,6 +897,14 @@ ip link set "$AP_IFACE" up 2>/dev/null || true
 ip addr add 192.168.42.1/24 dev "$AP_IFACE" 2>/dev/null || true
 
 # 7. Start dnsmasq with dynamic binding and designated leases file
+if [ -f "${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "${PID_FILE}.dnsmasq"
+fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+sleep 0.5
+
 dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
   --interface="$AP_IFACE" \\
   --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
@@ -887,17 +921,19 @@ AP_IFACE="${apIface}"
 PID_FILE="${WIFI_PID_FILE}"
 DENY_FILE="${WIFI_DENY_FILE}"
 
-if [ -f "\${PID_FILE}.dnsmasq" ]; then
-  kill "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
-  rm -f "\${PID_FILE}.dnsmasq"
+if [ -f "${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "${PID_FILE}.dnsmasq"
 fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
 
 if [ -f "$PID_FILE" ]; then
-  kill "$(cat "$PID_FILE")" 2>/dev/null || true
+  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
   rm -f "$PID_FILE"
 fi
 
-killall hostapd 2>/dev/null || true
+killall -9 hostapd 2>/dev/null || true
 
 # Remove from firewalld trusted zone if present
 if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
@@ -907,7 +943,7 @@ fi
 # Clean up blacklist rules if existing
 if [ -f "$DENY_FILE" ]; then
   while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\r\n ')
+    mac=$(echo "$mac" | tr -d '\\r\\n ')
     if [ -n "$mac" ]; then
       iptables -D INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
       iptables -D FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
@@ -919,7 +955,7 @@ iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>
 iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED 2>/dev/null || true
+iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
@@ -986,8 +1022,29 @@ export function stopWifiHotspot() {
     }
   }
 
+  // Direct cleanup fallback via sudo in case stop script was outdated or failed
+  try {
+    spawnSync('sudo', ['bash', '-c', `
+      if [ -f "${WIFI_PID_FILE}.dnsmasq" ]; then
+        kill -9 "$(cat "${WIFI_PID_FILE}.dnsmasq")" 2>/dev/null || true
+        rm -f "${WIFI_PID_FILE}.dnsmasq"
+      fi
+      pkill -9 -f "dnsmasq.*--interface=ap0" 2>/dev/null || true
+      pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+      if [ -f "${WIFI_PID_FILE}" ]; then
+        kill -9 "$(cat "${WIFI_PID_FILE}")" 2>/dev/null || true
+        rm -f "${WIFI_PID_FILE}"
+      fi
+      killall -9 hostapd 2>/dev/null || true
+      iw dev ap0 del 2>/dev/null || true
+    `], { stdio: 'ignore' });
+  } catch {}
+
   try {
     if (fs.existsSync(WIFI_PID_FILE)) fs.unlinkSync(WIFI_PID_FILE);
+  } catch {}
+  try {
+    if (fs.existsSync(`${WIFI_PID_FILE}.dnsmasq`)) fs.unlinkSync(`${WIFI_PID_FILE}.dnsmasq`);
   } catch {}
 
   logger.success('Wi-Fi hotspot stopped and virtual interface cleaned up.');

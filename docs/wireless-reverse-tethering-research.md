@@ -413,3 +413,60 @@ Linksy resolves this transparently through automatic regional regulatory inspect
 5. **Integrated Doctor Diagnostics**:
    `linksy doctor` verifies the active upstream link's regulatory compliance, identifying restricted channels before the user attempts to launch the hotspot.
 
+---
+
+## 13. Stale Daemon Socket Collisions (`dnsmasq: Address already in use`) & Resilient Process Lifecycle Management
+
+### 13.1 Symptom
+When starting the Wi-Fi hotspot with `linksy on --wifi`, the startup sequence aborts with exit status 2:
+```text
+ap0: interface state UNINITIALIZED->ENABLED
+ap0: AP-ENABLED
+
+dnsmasq: failed to create listening socket for 192.168.42.1: Address already in use
+✖ Failed to start Wi-Fi hotspot (exit status: 2).
+```
+Subsequent attempts to run `linksy off` report:
+```text
+ℹ Stopping Linksy services...
+ℹ No active Linksy services were running.
+```
+Even though `linksy off` reports no active services, repeating `linksy on --wifi` continuously fails with the exact same socket bind collision error.
+
+### 13.2 Root Cause Analysis
+1. **Asymmetric Process Ownership and Privilege Dropping**:
+   `hostapd` and `dnsmasq` operate under fundamentally different security models:
+   - `hostapd` runs continuously as `root` and writes its PID to `wifi.pid`.
+   - `dnsmasq` starts as `root` to bind privileged ports (port 53 for DNS, port 67 for DHCP), but immediately drops privileges to the system `dnsmasq` user and writes its PID to `wifi.pid.dnsmasq`.
+2. **Orphaned Daemon Accumulation on Startup Aborts**:
+   In `start-hotspot.sh` (executed with `set -e`), operations occur sequentially:
+   - Hostapd daemon launch (`hostapd -B -P wifi.pid`).
+   - Virtual interface setup and subnet assignment (`192.168.42.1/24` to `ap0`).
+   - Dnsmasq daemon launch (`dnsmasq --interface=ap0 ...`).
+   If a previous `dnsmasq` instance remained alive or was not cleaned up during an unexpected restart, it retained its active listening socket on `192.168.42.1:53` and UDP broadcast on port 67.
+   When the newly spawned `dnsmasq` attempted to bind to `192.168.42.1:53`, the kernel returned `EADDRINUSE`, causing `dnsmasq` to terminate with exit code 2. Because `set -e` was active, the entire script failed immediately, leaving `hostapd` running in the background as an orphan.
+3. **PID File Desynchronization and Unprivileged Process Signaling**:
+   - Earlier versions of `isHotspotRunning()` and `offCommand()` only tracked `wifi.pid`. If `hostapd` died or was terminated while `dnsmasq` lingered, Linksy assumed the hotspot was completely stopped and refused to trigger `stop-hotspot.sh`.
+   - An unprivileged user invoking `kill` or Node's `process.kill()` on the `dnsmasq` process encountered `EPERM` (Operation not permitted) because the process was owned by the `dnsmasq` system user.
+   - Without explicit, root-privileged forceful termination (`kill -9` and `pkill -9`), the socket remained in a TIME_WAIT / bound state.
+
+### 13.3 The Resolution & Multi-Layer Architecture (Released in v1.5.1)
+Linksy implements a multi-layer defense ensuring zero socket leakage across crashes, reboots, and aborted runs:
+
+1. **Pre-Flight Daemon and Port Sanitation in `start-hotspot.sh`**:
+   Before creating interfaces or initializing radios, `start-hotspot.sh` runs as `root` under `sudo` and performs thorough process sweep:
+   - Reads `${PID_FILE}.dnsmasq` and issues `kill -9`.
+   - Pattern-kills any running `dnsmasq` process bound to the AP interface or Linksy subnet:
+     ```bash
+     pkill -9 -f "dnsmasq.*--interface=${AP_IFACE}" 2>/dev/null || true
+     pkill -9 -f "dnsmasq.*192\.168\.42\." 2>/dev/null || true
+     ```
+   - Forcefully stops lingering `hostapd` instances (`killall -9 hostapd`).
+   - Right before launching `dnsmasq` (Step 7), re-verifies socket cleanliness with an explicit 0.5s settling pause to allow the kernel socket table to clear.
+2. **Dual-Daemon State Inspection (`isHotspotRunning`)**:
+   `isHotspotRunning()` now inspects both `wifi.pid` (`hostapd`) and `wifi.pid.dnsmasq` (`dnsmasq`). It cleanly interprets `EPERM` as positive confirmation that the daemon is active on the system.
+3. **Comprehensive Teardown and Sudo Fallback in `offCommand`**:
+   - `linksy off` evaluates `isHotspotRunning()`, `wifi.pid`, `wifi.pid.dnsmasq`, and physical sysfs interface presence (`/sys/class/net/ap0`).
+   - `stopWifiHotspot()` runs `stop-hotspot.sh` and executes a direct sudo fallback block, guaranteeing interface deletion, iptables rule purging, and process termination even if static script files on disk were outdated.
+
+

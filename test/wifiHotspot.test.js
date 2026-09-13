@@ -1,4 +1,5 @@
-import { describe, it, expect } from 'vitest';
+import { describe, it, expect, vi, afterEach } from 'vitest';
+import fs from 'node:fs';
 import {
   parseActiveWifiInfo,
   generateHostapdConfig,
@@ -8,8 +9,10 @@ import {
   parseRegulatoryBands,
   isChannelCompatibleWithRegion,
   normalizeBand,
-  getSystemCountryFallback
+  getSystemCountryFallback,
+  isHotspotRunning
 } from '../src/lib/wifiHotspot.js';
+import { WIFI_PID_FILE } from '../src/lib/paths.js';
 
 describe('wifiHotspot - parseActiveWifiInfo', () => {
   it('correctly parses 5GHz active connection details', () => {
@@ -296,6 +299,59 @@ describe('wifiHotspot - normalizeBand', () => {
     expect(normalizeBand(null)).toBeNull();
     expect(normalizeBand('auto')).toBeNull();
     expect(normalizeBand('invalid')).toBeNull();
+  });
+});
+
+describe('wifiHotspot - isHotspotRunning', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('returns false when no pid files exist', () => {
+    vi.spyOn(fs, 'existsSync').mockReturnValue(false);
+    expect(isHotspotRunning()).toBe(false);
+  });
+
+  it('returns true when WIFI_PID_FILE points to an active process', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation(p => p === WIFI_PID_FILE);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('12345');
+    vi.spyOn(process, 'kill').mockImplementation((pid, sig) => {
+      if (pid === 12345 && sig === 0) return true;
+      throw new Error('Process not found');
+    });
+    expect(isHotspotRunning()).toBe(true);
+  });
+
+  it('returns true when dnsmasq pid file points to an active process', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation(p => typeof p === 'string' && p.endsWith('.dnsmasq'));
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('54321');
+    vi.spyOn(process, 'kill').mockImplementation((pid, sig) => {
+      if (pid === 54321 && sig === 0) return true;
+      throw new Error('Process not found');
+    });
+    expect(isHotspotRunning()).toBe(true);
+  });
+
+  it('returns true when kill throws EPERM (process alive but unprivileged)', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation(p => typeof p === 'string' && p.endsWith('.dnsmasq'));
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('54321');
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      const err = new Error('EPERM');
+      err.code = 'EPERM';
+      throw err;
+    });
+    expect(isHotspotRunning()).toBe(true);
+  });
+
+  it('returns false when pid file points to dead process', () => {
+    vi.spyOn(fs, 'existsSync').mockImplementation(p => p === WIFI_PID_FILE);
+    vi.spyOn(fs, 'readFileSync').mockReturnValue('99999');
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      const err = new Error('ESRCH');
+      err.code = 'ESRCH';
+      throw err;
+    });
+    expect(isHotspotRunning()).toBe(false);
   });
 });
 
