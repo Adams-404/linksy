@@ -18,6 +18,8 @@ import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
 import { logger } from '../utils/logger.js';
 
+const PID_FILE = WIFI_PID_FILE;
+
 /**
  * Detects the laptop model or host to build a unique, human-friendly default SSID (e.g. Linksy-ThinkPad-T490s).
  * Capped to standard 802.11 32-byte SSID limit.
@@ -614,6 +616,185 @@ export function ensureWifiDependencies() {
 }
 
 /**
+ * Generates the start-hotspot.sh bash script content.
+ */
+export function generateStartScript({ activeWifi, apIface, adminGroup }) {
+  return `#!/usr/bin/env bash
+set -e
+IFACE="${activeWifi.iface}"
+AP_IFACE="${apIface}"
+CONF="${WIFI_CONFIG_FILE}"
+PID_FILE="${WIFI_PID_FILE}"
+LOG_FILE="${WIFI_LOG_FILE}"
+LEASES_FILE="${WIFI_LEASES_FILE}"
+DENY_FILE="${WIFI_DENY_FILE}"
+ADMIN_GROUP="${adminGroup}"
+
+# Clear previous log
+: > "$LOG_FILE"
+
+# 0. Pre-emptively tell NetworkManager to ignore ap0 before interface creation
+mkdir -p /run/NetworkManager/conf.d
+cat << 'NMEOF' > /run/NetworkManager/conf.d/99-linksy.conf
+[keyfile]
+unmanaged-devices=interface-name:ap0;interface-name:pan0
+NMEOF
+nmcli general reload conf 2>/dev/null || true
+
+mkdir -p /run/hostapd
+chgrp "$ADMIN_GROUP" /run/hostapd 2>/dev/null || true
+chmod 775 /run/hostapd 2>/dev/null || true
+
+# 1. Clean up stale ap interface and lingering daemon processes if existing
+if [ -f "\${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "\${PID_FILE}.dnsmasq"
+fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+
+if [ -f "$PID_FILE" ]; then
+  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
+  rm -f "$PID_FILE"
+fi
+killall -9 hostapd 2>/dev/null || true
+
+iw dev "$AP_IFACE" del 2>/dev/null || true
+
+# 2. Add virtual AP interface
+iw dev "$IFACE" interface add "$AP_IFACE" type __ap
+
+# Ensure distinct MAC address if virtual AP inherited identical MAC to physical adapter
+# (prevents duplicate BSSID beacon rejection on Intel 8265 and PCIe chipsets)
+AP_MAC=$(cat /sys/class/net/"$AP_IFACE"/address 2>/dev/null || true)
+PHY_MAC=$(cat /sys/class/net/"$IFACE"/address 2>/dev/null || true)
+if [ -n "$AP_MAC" ] && [ "$AP_MAC" = "$PHY_MAC" ]; then
+  FIRST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC%%:*} | 2) & 254 )))
+  LAST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC##*:} + 1) % 256 )))
+  NEW_MAC="\${FIRST_BYTE}\${AP_MAC#??}"
+  NEW_MAC="\${NEW_MAC%??}\${LAST_BYTE}"
+  ip link set dev "$AP_IFACE" address "$NEW_MAC" 2>/dev/null || true
+fi
+
+# 3. Tell NetworkManager not to interfere with virtual AP interface
+nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
+
+# 4. Flush stale IP and keep interface DOWN so hostapd can bind the radio cleanly
+ip link set "$AP_IFACE" down 2>/dev/null || true
+ip addr flush dev "$AP_IFACE" 2>/dev/null || true
+
+# 5. Enable IP forwarding and firewall/NAT rules
+sysctl -w net.ipv4.ip_forward=1 >/dev/null
+
+# If firewalld is active, assign AP interface to trusted zone so DHCP, DNS, and traffic forwarding are permitted
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --add-interface="$AP_IFACE" 2>/dev/null || true
+fi
+
+# Apply any blacklist drop rules
+if [ -f "$DENY_FILE" ]; then
+  while read -r mac; do
+    mac=$(echo "$mac" | tr -d '\\r\\n ')
+    if [ -n "$mac" ]; then
+      iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+      iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    fi
+  done < "$DENY_FILE"
+fi
+
+# Insert explicit iptables rules for DHCP, DNS, and NAT routing
+iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
+  iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
+
+# 6. Start hostapd in daemon mode with PID file
+hostapd -B -P "$PID_FILE" "$CONF" >> "$LOG_FILE" 2>&1
+sleep 1
+
+# Bring interface UP and assign private IP after hostapd initializes radio and beaconing
+ip link set "$AP_IFACE" up 2>/dev/null || true
+ip addr add 192.168.42.1/24 dev "$AP_IFACE" 2>/dev/null || true
+
+# 7. Start dnsmasq with dynamic binding and designated leases file
+if [ -f "\${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "\${PID_FILE}.dnsmasq"
+fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+sleep 0.5
+
+dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
+  --interface="$AP_IFACE" \\
+  --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
+  --dhcp-option=3,192.168.42.1 \\
+  --dhcp-option=6,1.1.1.1,8.8.8.8 \\
+  --dhcp-leasefile="$LEASES_FILE" \\
+  --log-dhcp \\
+  --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
+`;
+}
+
+/**
+ * Generates the stop-hotspot.sh bash script content.
+ */
+export function generateStopScript({ iface, apIface }) {
+  return `#!/usr/bin/env bash
+IFACE="${iface}"
+AP_IFACE="${apIface}"
+PID_FILE="${WIFI_PID_FILE}"
+DENY_FILE="${WIFI_DENY_FILE}"
+
+if [ -f "\${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "\${PID_FILE}.dnsmasq"
+fi
+pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
+pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
+
+if [ -f "$PID_FILE" ]; then
+  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
+  rm -f "$PID_FILE"
+fi
+
+killall -9 hostapd 2>/dev/null || true
+
+# Remove from firewalld trusted zone if present
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --remove-interface="$AP_IFACE" 2>/dev/null || true
+fi
+
+# Clean up blacklist rules if existing
+if [ -f "$DENY_FILE" ]; then
+  while read -r mac; do
+    mac=$(echo "$mac" | tr -d '\\r\\n ')
+    if [ -n "$mac" ]; then
+      iptables -D INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+      iptables -D FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
+    fi
+  done < "$DENY_FILE"
+fi
+
+iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
+
+rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
+nmcli general reload conf 2>/dev/null || true
+
+nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
+iw dev "$AP_IFACE" del 2>/dev/null || true
+`;
+}
+
+/**
  * Starts concurrent AP+STA Wi-Fi hotspot on the matching channel.
  * @param {{ ssid?: string, password?: string, apIface?: string }} options
  */
@@ -796,174 +977,8 @@ export async function startWifiHotspot(options = {}) {
   const startScriptPath = path.join(WIFI_DIR, 'start-hotspot.sh');
   const stopScriptPath = path.join(WIFI_DIR, 'stop-hotspot.sh');
 
-  const startScript = `#!/usr/bin/env bash
-set -e
-IFACE="${activeWifi.iface}"
-AP_IFACE="${apIface}"
-CONF="${WIFI_CONFIG_FILE}"
-PID_FILE="${WIFI_PID_FILE}"
-LOG_FILE="${WIFI_LOG_FILE}"
-LEASES_FILE="${WIFI_LEASES_FILE}"
-DENY_FILE="${WIFI_DENY_FILE}"
-ADMIN_GROUP="${adminGroup}"
-
-# Clear previous log
-: > "$LOG_FILE"
-
-# 0. Pre-emptively tell NetworkManager to ignore ap0 before interface creation
-mkdir -p /run/NetworkManager/conf.d
-cat << 'NMEOF' > /run/NetworkManager/conf.d/99-linksy.conf
-[keyfile]
-unmanaged-devices=interface-name:ap0;interface-name:pan0
-NMEOF
-nmcli general reload conf 2>/dev/null || true
-
-mkdir -p /run/hostapd
-chgrp "$ADMIN_GROUP" /run/hostapd 2>/dev/null || true
-chmod 775 /run/hostapd 2>/dev/null || true
-
-# 1. Clean up stale ap interface and lingering daemon processes if existing
-if [ -f "${PID_FILE}.dnsmasq" ]; then
-  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
-  rm -f "${PID_FILE}.dnsmasq"
-fi
-pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
-pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
-
-if [ -f "$PID_FILE" ]; then
-  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
-  rm -f "$PID_FILE"
-fi
-killall -9 hostapd 2>/dev/null || true
-
-iw dev "$AP_IFACE" del 2>/dev/null || true
-
-# 2. Add virtual AP interface
-iw dev "$IFACE" interface add "$AP_IFACE" type __ap
-
-# Ensure distinct MAC address if virtual AP inherited identical MAC to physical adapter
-# (prevents duplicate BSSID beacon rejection on Intel 8265 and PCIe chipsets)
-AP_MAC=$(cat /sys/class/net/"$AP_IFACE"/address 2>/dev/null || true)
-PHY_MAC=$(cat /sys/class/net/"$IFACE"/address 2>/dev/null || true)
-if [ -n "$AP_MAC" ] && [ "$AP_MAC" = "$PHY_MAC" ]; then
-  FIRST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC%%:*} | 2) & 254 )))
-  LAST_BYTE=$(printf '%02x' $(( (0x\${AP_MAC##*:} + 1) % 256 )))
-  NEW_MAC="\${FIRST_BYTE}\${AP_MAC#??}"
-  NEW_MAC="\${NEW_MAC%??}\${LAST_BYTE}"
-  ip link set dev "$AP_IFACE" address "$NEW_MAC" 2>/dev/null || true
-fi
-
-# 3. Tell NetworkManager not to interfere with virtual AP interface
-nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
-
-# 4. Flush stale IP and keep interface DOWN so hostapd can bind the radio cleanly
-ip link set "$AP_IFACE" down 2>/dev/null || true
-ip addr flush dev "$AP_IFACE" 2>/dev/null || true
-
-# 5. Enable IP forwarding and firewall/NAT rules
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-# If firewalld is active, assign AP interface to trusted zone so DHCP, DNS, and traffic forwarding are permitted
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-  firewall-cmd --zone=trusted --add-interface="$AP_IFACE" 2>/dev/null || true
-fi
-
-# Apply any blacklist drop rules
-if [ -f "$DENY_FILE" ]; then
-  while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\\r\\n ')
-    if [ -n "$mac" ]; then
-      iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-      iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-    fi
-  done < "$DENY_FILE"
-fi
-
-# Insert explicit iptables rules for DHCP, DNS, and NAT routing
-iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
-  iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-
-# 6. Start hostapd in daemon mode with PID file
-hostapd -B -P "$PID_FILE" "$CONF" >> "$LOG_FILE" 2>&1
-sleep 1
-
-# Bring interface UP and assign private IP after hostapd initializes radio and beaconing
-ip link set "$AP_IFACE" up 2>/dev/null || true
-ip addr add 192.168.42.1/24 dev "$AP_IFACE" 2>/dev/null || true
-
-# 7. Start dnsmasq with dynamic binding and designated leases file
-if [ -f "${PID_FILE}.dnsmasq" ]; then
-  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
-  rm -f "${PID_FILE}.dnsmasq"
-fi
-pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
-pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
-sleep 0.5
-
-dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
-  --interface="$AP_IFACE" \\
-  --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
-  --dhcp-option=3,192.168.42.1 \\
-  --dhcp-option=6,1.1.1.1,8.8.8.8 \\
-  --dhcp-leasefile="$LEASES_FILE" \\
-  --log-dhcp \\
-  --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
-`;
-
-  const stopScript = `#!/usr/bin/env bash
-IFACE="${activeWifi.iface}"
-AP_IFACE="${apIface}"
-PID_FILE="${WIFI_PID_FILE}"
-DENY_FILE="${WIFI_DENY_FILE}"
-
-if [ -f "${PID_FILE}.dnsmasq" ]; then
-  kill -9 "$(cat "${PID_FILE}.dnsmasq")" 2>/dev/null || true
-  rm -f "${PID_FILE}.dnsmasq"
-fi
-pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
-pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
-
-if [ -f "$PID_FILE" ]; then
-  kill -9 "$(cat "$PID_FILE")" 2>/dev/null || true
-  rm -f "$PID_FILE"
-fi
-
-killall -9 hostapd 2>/dev/null || true
-
-# Remove from firewalld trusted zone if present
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-  firewall-cmd --zone=trusted --remove-interface="$AP_IFACE" 2>/dev/null || true
-fi
-
-# Clean up blacklist rules if existing
-if [ -f "$DENY_FILE" ]; then
-  while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\\r\\n ')
-    if [ -n "$mac" ]; then
-      iptables -D INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-      iptables -D FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-    fi
-  done < "$DENY_FILE"
-fi
-
-iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
-
-rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
-nmcli general reload conf 2>/dev/null || true
-
-nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
-iw dev "$AP_IFACE" del 2>/dev/null || true
-`;
+  const startScript = generateStartScript({ activeWifi, apIface, adminGroup });
+  const stopScript = generateStopScript({ iface: activeWifi.iface, apIface });
 
   fs.writeFileSync(startScriptPath, startScript, { mode: 0o755 });
   fs.writeFileSync(stopScriptPath, stopScript, { mode: 0o755 });

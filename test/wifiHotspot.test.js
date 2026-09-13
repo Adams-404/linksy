@@ -10,7 +10,9 @@ import {
   isChannelCompatibleWithRegion,
   normalizeBand,
   getSystemCountryFallback,
-  isHotspotRunning
+  isHotspotRunning,
+  generateStartScript,
+  generateStopScript
 } from '../src/lib/wifiHotspot.js';
 import { WIFI_PID_FILE } from '../src/lib/paths.js';
 
@@ -352,6 +354,41 @@ describe('wifiHotspot - isHotspotRunning', () => {
       throw err;
     });
     expect(isHotspotRunning()).toBe(false);
+  });
+});
+
+describe('wifiHotspot - script generation', () => {
+  it('generates valid start script with robust dnsmasq cleanup and escaped variables', () => {
+    const script = generateStartScript({
+      activeWifi: { iface: 'wlp0s20f3', channel: 6, hwMode: 'g' },
+      apIface: 'ap0',
+      adminGroup: 'wheel'
+    });
+
+    expect(script).toContain('IFACE="wlp0s20f3"');
+    expect(script).toContain('AP_IFACE="ap0"');
+    expect(script).toContain('kill -9 "$(cat "${PID_FILE}.dnsmasq")"');
+    expect(script).toContain('pkill -9 -f "dnsmasq.*--interface=${AP_IFACE}"');
+    expect(script).toContain('pkill -9 -f "dnsmasq.*192\\.168\\.42\\."');
+    expect(script).toContain('--pid-file="${PID_FILE}.dnsmasq"');
+    expect(script).toContain('ADMIN_GROUP="wheel"');
+    expect(script).not.toContain('undefined');
+  });
+
+  it('generates valid stop script with robust dnsmasq cleanup and escaped variables', () => {
+    const script = generateStopScript({
+      iface: 'wlp0s20f3',
+      apIface: 'ap0'
+    });
+
+    expect(script).toContain('IFACE="wlp0s20f3"');
+    expect(script).toContain('AP_IFACE="ap0"');
+    expect(script).toContain('kill -9 "$(cat "${PID_FILE}.dnsmasq")"');
+    expect(script).toContain('pkill -9 -f "dnsmasq.*--interface=${AP_IFACE}"');
+    expect(script).toContain('pkill -9 -f "dnsmasq.*192\\.168\\.42\\."');
+    expect(script).toContain('killall -9 hostapd');
+    expect(script).toContain('iw dev "$AP_IFACE" del');
+    expect(script).not.toContain('undefined');
   });
 });
 
