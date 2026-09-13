@@ -1,6 +1,6 @@
 # Wireless Reverse Tethering Research & Architecture
 
-> **Document Version**: 1.1.0  
+> **Document Version**: 1.2.0  
 > **Date**: September 2026  
 > **Target Project**: Linksy PhoneNet  
 > **Author**: Adams-404  
@@ -349,3 +349,67 @@ Linksy resolves these hardware variations automatically:
    `ap0` is kept strictly `DOWN` while `hostapd` binds the `nl80211` radio and configures beacons. Only after `hostapd` binds is the link brought `UP` and the private subnet IP assigned.
 3. **Elimination of Unsolicited Country Updates**:
    In concurrent STA+AP mode, the radio already operates within the valid regulatory constraints of the upstream connected router. Omitting unsolicited `country_code` entries prevents self-managed adapters from entering `COUNTRY_UPDATE` stalls, allowing instant beaconing across all supported machines.
+
+---
+
+## 12. Regional Regulatory Domain Incompatibilities & Automatic 2.4 GHz Self-Healing (The Nigeria 5 GHz Channel 48 Case Study)
+
+### 12.1 Symptom
+On laptops connected to a 5 GHz Wi-Fi network, `linksy on --wifi` executes successfully and reports an active hotspot (`state=ENABLED`, `ap0: AP-ENABLED`). However:
+1. Mobile devices (particularly smartphones with Nigerian SIM cards or regional carrier MCC 621) cannot see the broadcasted SSID in their Wi-Fi network picker.
+2. Scanning the terminal Wi-Fi QR code (`linksy qr`) results in an immediate or delayed "Failed to connect" error on the client device.
+3. Host system logs reveal that `hostapd` received zero probe requests, authentication frames, or association attempts from the phone.
+4. The setup functioned seamlessly on 5 GHz previously when the upstream router operated on Channel 149 (5745 MHz), but broke without warning when the router roamed to Channel 48 (5240 MHz).
+
+### 12.2 Root Cause Analysis
+This failure is not a hardware fault or hostapd configuration bug, but a client-side regulatory enforcement lock:
+
+1. **Carrier MCC & Mobile Regulatory Tables (`regdb`)**:
+   Modern mobile operating systems (Android via `wificond` and iOS) determine their Wi-Fi regulatory domain dynamically from the cellular carrier's Mobile Country Code (MCC), e.g. MCC 621 for Nigeria (`NG`).
+2. **The Nigerian Communications Commission (NCC) / ETSI Frequency Gap**:
+   Inspecting the kernel regulatory database for Nigeria (`iw reg get`):
+   ```text
+   global
+   country NG: DFS-ETSI
+       (2402 - 2482 @ 40), (N/A, 20), (N/A)
+       (5250 - 5330 @ 80), (N/A, 30), (0 ms), DFS
+       (5735 - 5835 @ 80), (N/A, 30), (N/A)
+   ```
+   Notice the authorized allocations:
+   - **2.4 GHz (Channels 1–13)**: Fully authorized (`2402 - 2482 MHz`).
+   - **5.2 GHz DFS (Channels 52–64)**: Authorized with Dynamic Frequency Selection (`5250 - 5330 MHz`).
+   - **5.8 GHz U-NII-3 / Band 4 (Channels 149–165)**: Fully authorized (`5735 - 5835 MHz`).
+   - **U-NII-1 (5150–5250 MHz / Channels 36–48)** and **U-NII-2C (5470–5725 MHz / Channels 100–144)** are **completely absent** from the Nigerian regulatory database.
+3. **Client-Side Baseband Radio Lock**:
+   When an Android or iOS device operates with a Nigerian SIM, the baseband driver applies the `NG` regulatory profile and **completely disables scanning and transmitting on Channels 36–48**. Even when explicitly instructed to connect via a QR code or manual profile, the phone's Wi-Fi chip refuses to tune its receiver to 5240 MHz.
+4. **Router Auto-Channel Hopping in Single-Radio Concurrent Mode**:
+   Because concurrent STA+AP mode requires both station and AP interfaces to share a single physical channel (`#channels <= 1`), Linksy cloned the upstream router's active channel. When the router dynamically shifted from Channel 149 (allowed in Nigeria) to Channel 48 (restricted in Nigeria), Linksy followed suit, unintentionally moving the hotspot out of range of local mobile devices.
+
+### 12.3 The Resolution & Architecture (Released in v1.5.0)
+Linksy resolves this transparently through automatic regional regulatory inspection and NetworkManager self-healing:
+
+1. **Regulatory Parsing & Dynamic Compatibility Matrix**:
+   - `parseRegulatoryBands()`: Dynamically extracts authorized frequency ranges from `iw reg get` alongside country code and timezone fallbacks.
+   - `isChannelCompatibleWithRegion()`: Evaluates the active upstream channel against local mobile device scanning restrictions (e.g. flagging channels 36–48 and 100–144 under `NG` domain).
+2. **Pre-emptive Radio Interface Release**:
+   Before modifying upstream frequencies on single-radio chipsets, any active `hostapd` virtual binding on `ap0` is demoted via `hostapd_cli -p /run/hostapd disable` or stopped. This prevents driver `EBUSY` deadlocks during upstream re-association.
+3. **Automated Upstream Band Shifting (`switchWifiBand`)**:
+   When an incompatible regulatory channel is detected on the active upstream connection, Linksy automatically:
+   - Queries the active NetworkManager profile for the physical Wi-Fi interface.
+   - Modifies `802-11-wireless.band` to `bg` (2.4 GHz) and clears any hardcoded BSSID locks:
+     ```bash
+     nmcli connection modify "<connection>" 802-11-wireless.band bg 802-11-wireless.bssid ""
+     nmcli connection up "<connection>"
+     ```
+   - NetworkManager transparently associates with the 2.4 GHz radio of the access point (e.g. Channel 6), without requiring user intervention or manual reconnections.
+   - Linksy detects the new 2.4 GHz channel via `getActiveWifiConnection()` and brings up the hotspot on the universally accessible frequency.
+4. **Explicit Band Control CLI Overrides**:
+   Users can manually control or bypass regulatory band selection using:
+   ```bash
+   linksy on --wifi --band 2.4   # Force 2.4 GHz band (shorthand: linksy on -w --2ghz)
+   linksy on --wifi --band 5     # Force 5 GHz band (shorthand: linksy on -w --5ghz)
+   linksy on --wifi --no-auto-band # Bypass automatic regulatory domain band switching
+   ```
+5. **Integrated Doctor Diagnostics**:
+   `linksy doctor` verifies the active upstream link's regulatory compliance, identifying restricted channels before the user attempts to launch the hotspot.
+
