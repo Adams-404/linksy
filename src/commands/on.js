@@ -29,7 +29,11 @@ export async function onCommand(options = {}) {
   }
 
   // Handle wireless options
-  if (options.wifi) {
+  const isWifiOption = options.wifi || options.band || options['2ghz'] || options['5ghz'] || options.ssid || options.name || options.noPassword || options.open;
+  if (isWifiOption) {
+    options.wifi = true;
+    if (options['2ghz']) options.band = '2.4';
+    if (options['5ghz']) options.band = '5';
     await startWifiHotspot(options);
     return;
   }

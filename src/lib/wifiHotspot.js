@@ -500,20 +500,109 @@ export function getRegulatoryInfo() {
 }
 
 /**
+ * Parses raw `iw list` or `iw phy <phy> info` text to find channels restricted for AP mode (NO-IR, disabled, radar).
+ * @param {string} iwListOutput
+ * @returns {Map<number, { freq: number, noIr: boolean, disabled: boolean, radar: boolean }>}
+ */
+export function parseRestrictedChannels(iwListOutput) {
+  const restricted = new Map();
+  if (!iwListOutput || typeof iwListOutput !== 'string') return restricted;
+
+  const lines = iwListOutput.split('\n');
+  for (const line of lines) {
+    const m = line.match(/\*\s*([\d.]+)\s*MHz\s*\[(\d+)\]\s*(.*)/i);
+    if (m) {
+      const freq = parseFloat(m[1]);
+      const chan = parseInt(m[2], 10);
+      const flags = m[3].toLowerCase();
+      const noIr = /no\s*ir|no-ir|passive/i.test(flags);
+      const disabled = /disabled/i.test(flags);
+      const radar = /radar/i.test(flags);
+
+      if (noIr || disabled || radar) {
+        restricted.set(chan, { freq, noIr, disabled, radar });
+      }
+    }
+  }
+
+  return restricted;
+}
+
+/**
+ * Retrieves restricted AP channels for the system's wireless adapter from `iw list` or sysfs phy info.
+ * @param {string|null} iface
+ * @returns {Map<number, { freq: number, noIr: boolean, disabled: boolean, radar: boolean }>}
+ */
+export function getChannelRestrictions(iface = null) {
+  try {
+    let output = '';
+    if (iface) {
+      try {
+        const phyPath = `/sys/class/net/${iface}/phy80211/name`;
+        if (fs.existsSync(phyPath)) {
+          const phy = fs.readFileSync(phyPath, 'utf8').trim();
+          if (phy) {
+            output = execSync(`iw phy ${phy} info`, { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+          }
+        }
+      } catch {}
+    }
+    if (!output) {
+      output = execSync('iw list', { encoding: 'utf8', stdio: ['pipe', 'pipe', 'ignore'] });
+    }
+    return parseRestrictedChannels(output);
+  } catch {
+    return new Map();
+  }
+}
+
+/**
  * Evaluates whether a Wi-Fi channel and frequency are authorized and detectable by mobile clients
- * in the current regulatory region (with special handling for Nigeria / NCC / ETSI restrictions).
- * @param {{ channel: number, freq?: number, countryCode?: string, regRanges?: Array<{ start: number, end: number }> }} params
+ * in the current regulatory region, and whether the physical wireless adapter allows AP mode (no NO-IR/disabled flags).
+ * @param {{ channel: number, freq?: number, countryCode?: string, regRanges?: Array<{ start: number, end: number }>, iface?: string, channelRestrictions?: Map<number, { freq: number, noIr: boolean, disabled: boolean, radar: boolean }> }} params
  * @returns {{ compatible: boolean, country: string|null, band: '2.4GHz'|'5GHz', reason?: string }}
  */
 export function isChannelCompatibleWithRegion({
   channel,
   freq = null,
   countryCode = null,
-  regRanges = null
+  regRanges = null,
+  iface = null,
+  channelRestrictions = null
 }) {
   const code = (countryCode || getRegulatoryCountry() || getSystemCountryFallback() || '').toUpperCase();
 
-  // 2.4 GHz channels 1 through 13 are universally supported across all jurisdictions
+  // 1. Hardware & Driver AP capability check: NO-IR (No Initiate Radiation) / disabled / radar detection
+  const restrictions = channelRestrictions || (iface ? getChannelRestrictions(iface) : null);
+  if (restrictions && restrictions.has(channel)) {
+    const r = restrictions.get(channel);
+    if (r.disabled) {
+      return {
+        compatible: false,
+        country: code || 'HARDWARE',
+        band: (channel > 14 || (freq && freq > 4000)) ? '5GHz' : '2.4GHz',
+        reason: `Channel ${channel} (${freq || r.freq} MHz) is disabled by your Wi-Fi card hardware or regulatory database.`
+      };
+    }
+    if (r.noIr) {
+      return {
+        compatible: false,
+        country: code || 'HARDWARE',
+        band: (channel > 14 || (freq && freq > 4000)) ? '5GHz' : '2.4GHz',
+        reason: `Channel ${channel} (${freq || r.freq} MHz) is marked NO-IR (No Initiate Radiation / passive scan only). Your Wi-Fi adapter cannot transmit beacons or run AP hotspot mode on this frequency.`
+      };
+    }
+    if (r.radar) {
+      return {
+        compatible: false,
+        country: code || 'HARDWARE',
+        band: '5GHz',
+        reason: `Channel ${channel} (${freq || r.freq} MHz) requires Radar Detection (DFS), which is not supported for concurrent virtual AP hotspot mode.`
+      };
+    }
+  }
+
+  // 2. 2.4 GHz channels 1 through 13 are universally supported across all jurisdictions
   if (channel >= 1 && channel <= 13) {
     return { compatible: true, country: code, band: '2.4GHz' };
   }
@@ -528,7 +617,7 @@ export function isChannelCompatibleWithRegion({
     };
   }
 
-  // Nigeria (NG) mobile regulatory restrictions:
+  // 3. Nigeria (NG) mobile regulatory restrictions:
   // Under NCC / ETSI frequency allocations and carrier SIM MCC 621 rules,
   // Android and iOS devices restrict/disable scanning on U-NII-1 (channels 36-48)
   // and U-NII-2C (channels 100-144).
@@ -545,7 +634,7 @@ export function isChannelCompatibleWithRegion({
     }
   }
 
-  // General check against regulatory ranges from iw reg get if available
+  // 4. General check against regulatory ranges from iw reg get if available
   const ranges = regRanges || (code ? getRegulatoryInfo().ranges : []);
   if (Array.isArray(ranges) && ranges.length > 0 && freq) {
     const inRange = ranges.some(r => freq >= r.start && freq <= r.end);
@@ -1136,7 +1225,8 @@ export async function startWifiHotspot(options = {}) {
   // Automatic Regulatory Domain & Regional Frequency Compatibility Check
   const compatCheck = isChannelCompatibleWithRegion({
     channel: activeWifi.channel,
-    freq: activeWifi.freq
+    freq: activeWifi.freq,
+    iface: activeWifi.iface
   });
 
   const shouldSwitchTo24 = (explicitBand === '2.4' && activeWifi.hwMode === 'a') ||
@@ -1145,7 +1235,7 @@ export async function startWifiHotspot(options = {}) {
 
   if (shouldSwitchTo24) {
     if (!compatCheck.compatible && !explicitBand) {
-      logger.warn(chalk.yellow(`Regulatory domain check [${compatCheck.country || 'LOCAL'}]: ${compatCheck.reason}`));
+      logger.warn(chalk.yellow(`Regulatory/hardware check [${compatCheck.country || 'LOCAL'}]: ${compatCheck.reason}`));
       logger.info(`Automatically switching laptop Wi-Fi for "${chalk.green(activeWifi.ssid)}" to 2.4 GHz so phones can connect...`);
     } else {
       logger.info(`Switching upstream Wi-Fi connection to 2.4 GHz as requested...`);
@@ -1224,27 +1314,85 @@ export async function startWifiHotspot(options = {}) {
   logger.info('Starting concurrent Wi-Fi hotspot (elevated privileges required for virtual interface & routing)...');
   const result = spawnSync('sudo', ['bash', startScriptPath], { stdio: 'inherit' });
 
-  if (result.status !== 0) {
-    logger.error(`Failed to start Wi-Fi hotspot (exit status: ${result.status}).`);
+  let failedToStart = result.status !== 0;
+  if (!failedToStart) {
+    // Brief pause to ensure hostapd started
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    failedToStart = !isHotspotRunning();
+  }
+
+  if (failedToStart) {
+    let failureLog = '';
     if (fs.existsSync(WIFI_LOG_FILE)) {
-      const logs = fs.readFileSync(WIFI_LOG_FILE, 'utf8').trim().split('\n').slice(-15).join('\n');
+      try { failureLog = fs.readFileSync(WIFI_LOG_FILE, 'utf8'); } catch {}
+    }
+
+    const isHardwareOrNoIrFailure = /NO-IR|not allowed for AP mode|Hardware does not support configured channel|Could not select hw_mode/i.test(failureLog);
+
+    // If starting on 5 GHz failed due to hardware/NO-IR restrictions or general AP start failure, automatically fallback to 2.4 GHz
+    if (activeWifi.hwMode === 'a' && autoBand && !explicitBand) {
+      logger.warn(chalk.yellow('\n5 GHz AP mode rejected by Wi-Fi card driver or regulatory domain (NO-IR / passive scan restriction).'));
+      logger.info(`Automatically falling back to 2.4 GHz for "${chalk.green(activeWifi.ssid)}" and retrying hotspot...`);
+
+      stopWifiHotspot();
+
+      try {
+        const switched = switchWifiBand(activeWifi.iface, activeWifi, '2.4');
+        if (switched && switched.connected) {
+          activeWifi = switched;
+          logger.success(`Upstream Wi-Fi adjusted to Channel ${chalk.cyan(activeWifi.channel)} (${activeWifi.freq ? `${activeWifi.freq} MHz, ` : ''}2.4 GHz).`);
+
+          const fallbackHostapdConfig = generateHostapdConfig({
+            apIface,
+            ssid,
+            password,
+            channel: activeWifi.channel,
+            hwMode: activeWifi.hwMode,
+            countryCode: null,
+            adminGroup,
+            whitelistMode: Boolean(saved.whitelistMode)
+          });
+          fs.writeFileSync(WIFI_CONFIG_FILE, fallbackHostapdConfig, { mode: 0o600 });
+
+          const fallbackStartScript = generateStartScript({ activeWifi, apIface, adminGroup });
+          fs.writeFileSync(startScriptPath, fallbackStartScript, { mode: 0o755 });
+
+          logger.info('Retrying hotspot launch on 2.4 GHz...');
+          const retryResult = spawnSync('sudo', ['bash', startScriptPath], { stdio: 'inherit' });
+          if (retryResult.status === 0) {
+            await new Promise(resolve => setTimeout(resolve, 1500));
+            if (isHotspotRunning()) {
+              logger.success(chalk.bold.green('Concurrent Wi-Fi Hotspot is now active (2.4 GHz fallback)!'));
+              console.log(
+                '\n' + chalk.bold.cyan('📡 Wi-Fi Hotspot Details:\n') +
+                `  • Network Name (SSID): ${chalk.bold.green(ssid)}\n` +
+                `  • Password:            ${password ? chalk.bold.yellow(password) : chalk.bold.magenta('None (Open Network)')}\n` +
+                `  • Channel:             ${chalk.cyan(activeWifi.channel)} (2.4 GHz)\n` +
+                `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n\n` +
+                `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
+                `Or scan the QR code to connect instantly: ${chalk.bold.cyan('linksy qr')}\n\n` +
+                `Run ${chalk.bold.cyan('linksy off')} at any time to stop the hotspot.\n`
+              );
+              return;
+            }
+          }
+        }
+      } catch (fallbackErr) {
+        logger.debug(`2.4 GHz fallback failed: ${fallbackErr.message}`);
+      }
+    }
+
+    logger.error(`Failed to start Wi-Fi hotspot (exit status: ${result.status}).`);
+    if (failureLog) {
+      const logs = failureLog.trim().split('\n').slice(-15).join('\n');
       if (logs) {
         console.log(chalk.dim('\nRecent logs:\n' + logs + '\n'));
       }
     }
-    process.exit(1);
-  }
-
-  // Brief pause to ensure hostapd started
-  await new Promise(resolve => setTimeout(resolve, 1500));
-
-  if (!isHotspotRunning()) {
-    logger.error('Hotspot started but exited unexpectedly.');
-    if (fs.existsSync(WIFI_LOG_FILE)) {
-      const logs = fs.readFileSync(WIFI_LOG_FILE, 'utf8').trim().split('\n').slice(-15).join('\n');
-      if (logs) {
-        console.log(chalk.dim('\nRecent logs:\n' + logs + '\n'));
-      }
+    if (isHardwareOrNoIrFailure) {
+      logger.info(chalk.yellow('\n💡 Suggestion: Your Wi-Fi card does not allow AP mode on this 5 GHz channel (NO-IR flag).'));
+      logger.info(`Try forcing 2.4 GHz by running: ${chalk.bold.cyan('linksy on --wifi --band 2.4')} (or ${chalk.bold.cyan('linksy on --wifi --2ghz')})`);
+      logger.info(`Or share internet over USB cable: ${chalk.bold.cyan('linksy on')}`);
     }
     process.exit(1);
   }

@@ -30,6 +30,8 @@ program
   .addHelpText('after', `
 Examples:
   $ linksy on --wifi                    # Share laptop Wi-Fi wirelessly to phone
+  $ linksy on --wifi --band 2.4         # Force 2.4 GHz Wi-Fi hotspot (alias: --2ghz)
+  $ linksy on --wifi --band 5           # Force 5 GHz Wi-Fi hotspot (alias: --5ghz)
   $ linksy on --wifi -p <password>      # Change hotspot password and connect
   $ linksy on --wifi --no-password      # Start open Wi-Fi network without password
   $ linksy name                         # View current hotspot name (e.g. Linksy-ThinkPad)

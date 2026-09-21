@@ -11,6 +11,7 @@ import {
   getDefaultHotspotSsid,
   generateApMac,
   parseRegulatoryBands,
+  parseRestrictedChannels,
   isChannelCompatibleWithRegion,
   normalizeBand,
   getSystemCountryFallback,
@@ -348,6 +349,41 @@ country NG: DFS-ETSI
   });
 });
 
+describe('wifiHotspot - parseRestrictedChannels', () => {
+  it('correctly identifies NO-IR, disabled, and radar channels from iw list output', () => {
+    const sampleOutput = `
+Frequencies:
+\t* 2412.0 MHz [1] (22.0 dBm)
+\t* 2472.0 MHz [13] (22.0 dBm)
+\t* 2484.0 MHz [14] (disabled)
+\t* 5180.0 MHz [36] (22.0 dBm)
+\t* 5260.0 MHz [52] (22.0 dBm) (no IR, radar detection)
+\t* 5745.0 MHz [149] (22.0 dBm) (no IR)
+\t* 5785.0 MHz [157] (22.0 dBm)
+    `;
+
+    const restricted = parseRestrictedChannels(sampleOutput);
+    expect(restricted.has(14)).toBe(true);
+    expect(restricted.get(14).disabled).toBe(true);
+
+    expect(restricted.has(52)).toBe(true);
+    expect(restricted.get(52).noIr).toBe(true);
+    expect(restricted.get(52).radar).toBe(true);
+
+    expect(restricted.has(149)).toBe(true);
+    expect(restricted.get(149).noIr).toBe(true);
+
+    expect(restricted.has(1)).toBe(false);
+    expect(restricted.has(36)).toBe(false);
+    expect(restricted.has(157)).toBe(false);
+  });
+
+  it('handles empty or invalid output safely', () => {
+    expect(parseRestrictedChannels('')).toEqual(new Map());
+    expect(parseRestrictedChannels(null)).toEqual(new Map());
+  });
+});
+
 describe('wifiHotspot - isChannelCompatibleWithRegion', () => {
   it('permits 2.4 GHz channels 1 through 13 in Nigeria (NG)', () => {
     const res = isChannelCompatibleWithRegion({ channel: 6, freq: 2437, countryCode: 'NG' });
@@ -355,10 +391,53 @@ describe('wifiHotspot - isChannelCompatibleWithRegion', () => {
     expect(res.band).toBe('2.4GHz');
   });
 
-  it('permits 5 GHz Channel 149 in Nigeria (5.8 GHz Band 4 is allowed)', () => {
+  it('permits 5 GHz Channel 149 in Nigeria when unrestricted by hardware', () => {
     const res = isChannelCompatibleWithRegion({ channel: 149, freq: 5745, countryCode: 'NG' });
     expect(res.compatible).toBe(true);
     expect(res.band).toBe('5GHz');
+  });
+
+  it('rejects 5 GHz Channel 149 when marked NO-IR by the Wi-Fi card adapter', () => {
+    const restrictions = new Map([
+      [149, { freq: 5745, noIr: true, disabled: false, radar: false }]
+    ]);
+    const res = isChannelCompatibleWithRegion({
+      channel: 149,
+      freq: 5745,
+      countryCode: 'NG',
+      channelRestrictions: restrictions
+    });
+    expect(res.compatible).toBe(false);
+    expect(res.reason).toContain('NO-IR');
+    expect(res.reason).toContain('passive scan only');
+  });
+
+  it('rejects channels marked disabled by hardware', () => {
+    const restrictions = new Map([
+      [14, { freq: 2484, noIr: false, disabled: true, radar: false }]
+    ]);
+    const res = isChannelCompatibleWithRegion({
+      channel: 14,
+      freq: 2484,
+      countryCode: 'JP',
+      channelRestrictions: restrictions
+    });
+    expect(res.compatible).toBe(false);
+    expect(res.reason).toContain('disabled by your Wi-Fi card hardware');
+  });
+
+  it('rejects channels requiring Radar Detection (DFS) for AP mode', () => {
+    const restrictions = new Map([
+      [52, { freq: 5260, noIr: false, disabled: false, radar: true }]
+    ]);
+    const res = isChannelCompatibleWithRegion({
+      channel: 52,
+      freq: 5260,
+      countryCode: 'US',
+      channelRestrictions: restrictions
+    });
+    expect(res.compatible).toBe(false);
+    expect(res.reason).toContain('Radar Detection (DFS)');
   });
 
   it('permits 5 GHz Channel 52 (DFS) in Nigeria', () => {

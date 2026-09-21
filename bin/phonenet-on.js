@@ -9,13 +9,13 @@ try {
     return idx !== -1 && idx + 1 < process.argv.length ? process.argv[idx + 1] : undefined;
   };
   const foreground = process.argv.includes('-f') || process.argv.includes('--foreground');
-  const wifi = process.argv.includes('-w') || process.argv.includes('--wifi');
+  const force2Ghz = process.argv.includes('--2ghz');
+  const force5Ghz = process.argv.includes('--5ghz');
+  const band = getArg('--band', '-B');
+  const wifi = process.argv.includes('-w') || process.argv.includes('--wifi') || force2Ghz || force5Ghz || Boolean(band);
   const bluetooth = process.argv.includes('-b') || process.argv.includes('--bluetooth');
   const password = getArg('--password', '-p');
   const ssid = getArg('--ssid', '-s');
-  const band = getArg('--band', '-B');
-  const force2Ghz = process.argv.includes('--2ghz');
-  const force5Ghz = process.argv.includes('--5ghz');
   const autoBand = !process.argv.includes('--no-auto-band');
   const noPassword = process.argv.includes('--no-password') || process.argv.includes('--open');
   await onCommand({

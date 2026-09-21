@@ -134,7 +134,11 @@ export async function doctorCommand() {
   }
 
   if (activeWifi) {
-    const compat = isChannelCompatibleWithRegion({ channel: activeWifi.channel, freq: activeWifi.freq });
+    const compat = isChannelCompatibleWithRegion({
+      channel: activeWifi.channel,
+      freq: activeWifi.freq,
+      iface: activeWifi.iface
+    });
     if (compat.compatible) {
       console.log(chalk.green('✔') + ' ' + chalk.bold('Active Wi-Fi Link:    ') + chalk.dim(` Connected to ${activeWifi.ssid || 'network'} (Ch ${activeWifi.channel}, ${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'}${compat.country ? `, region ${compat.country}` : ''})`));
     } else {

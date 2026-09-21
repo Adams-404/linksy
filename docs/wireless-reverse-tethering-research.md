@@ -530,3 +530,56 @@ Linksy v1.5.3 introduces a robust multi-engine discovery pipeline:
 5. **Enhanced Diagnostics & Disconnected Feedback**:
    - `linksy doctor` verifies `iw`, `hostapd`, and `dnsmasq` together.
    - If Wi-Fi is physically present but unassociated, `linksy on --wifi` identifies the specific adapter (e.g. `Detected Wi-Fi adapter: wlo1 (currently disconnected)`), clarifying the exact state for the user.
+
+---
+
+## 15. Hardware & Regulatory `NO-IR` Restrictions (5 GHz AP Mode Failure) & Two-Tier Auto-Recovery (Released in v1.5.4)
+
+### 15.1 Symptom
+When connected to a 5 GHz Wi-Fi network (such as Channel 149, 5745 MHz), starting the concurrent hotspot with `linksy on --wifi` fails with:
+```text
+Frequency 5745 (primary) not allowed for AP mode, flags: 0x20853 NO-IR
+Primary frequency not allowed
+ap0: IEEE 802.11 Configured channel (149) or frequency (5745) (secondary_channel=0) not found from the channel list of the current mode (2) IEEE 802.11a
+ap0: IEEE 802.11 Hardware does not support configured channel
+Could not select hw_mode and channel. (-3)
+ap0: interface state UNINITIALIZED->DISABLED
+ap0: AP-DISABLED
+✖ Failed to start Wi-Fi hotspot (exit status: 1).
+```
+The user asks:
+1. *"Isn't there a command to switch if the frequency is 5 GHz? Why don't I see it in `--help`?"*
+2. *"Why didn't Linksy switch automatically to 2.4 GHz?"*
+
+### 15.2 Root Cause Analysis
+
+1. **What is `NO-IR` (No Initiate Radiation)?**:
+   In Linux wireless architecture (`nl80211` / `cfg80211`), channels in the regulatory database or EEPROM firmware can carry the flag `NO-IR` (*No Initiate Radiation*, formerly `NO-IBSS` or passive scanning).
+   A laptop Wi-Fi adapter on a `NO-IR` channel is permitted to operate as a client/station (**STA**) because it only listens for access point beacons and responds. However, the driver and kernel regulatory enforcement **strictly forbid transmitting unsolicited beacons or operating as an Access Point (AP)** on that channel.
+   Many wireless chipsets (Realtek RTL8821CE/8822CE, certain Atheros, Broadcom, or Intel cards initialized with world regulatory domain `00` or manufacturer firmware tables) mark 5 GHz channels (including U-NII-3 Channel 149) with `NO-IR`.
+
+2. **Geographical Policy vs Physical Hardware Capability**:
+   In Linksy v1.5.0, geographical country checks were introduced (e.g. Nigerian SIM card scanning rules blocking channels 36–48 and 100–144). Under Nigerian NCC / ETSI regulations, Channel 149 (5745 MHz) is legally permitted for consumers, so `isChannelCompatibleWithRegion()` evaluated it as `compatible: true`.
+   However, Linksy did not check the *physical adapter's hardware channel flags* in `iw list` / `iw phy info`. As a result, Linksy attempted to start `hostapd` on Channel 149, triggering the driver's hard `NO-IR` veto.
+
+3. **Help Visibility & Flag Handling**:
+   - The `--band 2.4`, `--band 5`, `--2ghz`, and `--5ghz` options were only displayed under `linksy on --help`, not in the main `linksy --help` examples.
+   - If a user ran `linksy on --2ghz` or `linksy on --band 2.4` without explicitly typing `--wifi`, Linksy checked for USB phone tethering instead of inferring Wi-Fi mode.
+   - When `hostapd` failed with `NO-IR`, Linksy printed the error and exited immediately rather than initiating an automatic fallback to 2.4 GHz.
+
+### 15.3 The Two-Tier Auto-Recovery Architecture (v1.5.4)
+
+Linksy v1.5.4 implements two defensive tiers that guarantee reliable, zero-touch hotspot creation on any hardware:
+
+1. **Tier 1 — Pre-Flight Hardware Capability Detection (`NO-IR` & DFS Inspection)**:
+   - Added `parseRestrictedChannels()` and `getChannelRestrictions(iface)` to inspect `iw phy <phy> info` and `iw list` directly for `no IR`, `disabled`, and `radar detection` flags.
+   - `isChannelCompatibleWithRegion()` now evaluates both geographical country rules and physical adapter restrictions. If the active channel has `NO-IR` or is disabled, it returns `compatible: false` with an explicit reason.
+   - Before `hostapd` is launched, Linksy warns the user and automatically switches the upstream Wi-Fi connection to 2.4 GHz (`switchWifiBand`), where channels 1–13 are universally supported for AP mode.
+
+2. **Tier 2 — Reactive Dynamic Fallback & Self-Healing**:
+   - If `hostapd` fails to start (exit status !== 0) on a 5 GHz channel due to unexpected driver-level `NO-IR` or hardware rejection, Linksy parses `WIFI_LOG_FILE`.
+   - If `autoBand` is active (default), Linksy automatically stops lingering processes, switches the upstream Wi-Fi to 2.4 GHz, regenerates `hostapd.conf` and the start script for 2.4 GHz, and relaunches the hotspot automatically.
+
+3. **Top-Level CLI Prominence & Implicit Wi-Fi Flag**:
+   - `linksy --help` now displays `$ linksy on --wifi --band 2.4` (alias: `--2ghz`) and `$ linksy on --wifi --band 5` (alias: `--5ghz`).
+   - Running `linksy on --2ghz`, `linksy on --5ghz`, or `linksy on --band <band>` automatically activates `--wifi` mode.
