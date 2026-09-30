@@ -169,21 +169,33 @@ if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/de
   firewall-cmd --zone=trusted --add-interface="$BRIDGE" 2>/dev/null || true
 fi
 
-# Insert explicit iptables rules for DHCP, DNS and NAT
+# Insert explicit iptables rules for DHCP, DNS, ICMP and NAT
 iptables -I INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -I FORWARD -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
+iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
 # 5. Start dnsmasq DHCP server for Bluetooth subnet
+RESOLV_CONF="/etc/resolv.conf"
+if [ -f "/run/systemd/resolve/resolv.conf" ]; then
+  RESOLV_CONF="/run/systemd/resolve/resolv.conf"
+fi
+
 dnsmasq --conf-file=/dev/null --no-hosts --bind-interfaces \\
   --except-interface=lo --interface="$BRIDGE" \\
+  --resolv-file="$RESOLV_CONF" \\
+  --server=1.1.1.1 --server=8.8.8.8 \\
   --dhcp-range=10.42.0.10,10.42.0.100,255.255.255.0,12h \\
+  --dhcp-option=1,255.255.255.0 \\
   --dhcp-option=3,10.42.0.1 \\
-  --dhcp-option=6,1.1.1.1,8.8.8.8 \\
+  --dhcp-option=6,10.42.0.1,1.1.1.1,8.8.8.8 \\
+  --dhcp-option=28,10.42.0.255 \\
   --log-dhcp \\
   --pid-file="$PID_FILE" >> "$LOG_FILE" 2>&1
 `;
@@ -208,8 +220,11 @@ fi
 iptables -D INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
+iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 ip link set "$BRIDGE" down 2>/dev/null || true

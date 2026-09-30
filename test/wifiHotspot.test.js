@@ -573,6 +573,29 @@ describe('wifiHotspot - script generation', () => {
     expect(script).toContain('--pid-file="${PID_FILE}.dnsmasq"');
     expect(script).toContain('ADMIN_GROUP="wheel"');
     expect(script).not.toContain('undefined');
+
+    // Windows client compatibility assertions:
+    // 1. TCP MSS clamping in iptables mangle table (prevents PMTU black hole drops)
+    expect(script).toContain('-t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu');
+
+    // 2. Disabling IPv6 on virtual AP interface (prevents Windows dual-stack NCSI/DNS/TCP timeouts)
+    expect(script).toContain('sysctl -w net.ipv6.conf."$AP_IFACE".disable_ipv6=1');
+    expect(script).toContain('ip -6 addr flush dev "$AP_IFACE"');
+
+    // 3. ICMP ping acceptance (allows Windows gateway connectivity verification)
+    expect(script).toContain('iptables -I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('iptables -I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT');
+
+    // 4. Explicit RFC 2132 DHCP options (subnet mask, router, gateway DNS, broadcast)
+    expect(script).toContain('--dhcp-option=1,255.255.255.0');
+    expect(script).toContain('--dhcp-option=3,192.168.42.1');
+    expect(script).toContain('--dhcp-option=6,192.168.42.1,1.1.1.1,8.8.8.8');
+    expect(script).toContain('--dhcp-option=28,192.168.42.255');
+
+    // 5. Upstream DNS servers and resolv.conf integration
+    expect(script).toContain('--resolv-file="$RESOLV_CONF"');
+    expect(script).toContain('--server=1.1.1.1');
+    expect(script).toContain('--server=8.8.8.8');
   });
 
   it('generates valid stop script with robust dnsmasq cleanup and escaped variables', () => {
@@ -589,6 +612,12 @@ describe('wifiHotspot - script generation', () => {
     expect(script).toContain('killall -9 hostapd');
     expect(script).toContain('iw dev "$AP_IFACE" del');
     expect(script).not.toContain('undefined');
+
+    // Clean up rules on teardown
+    expect(script).toContain('iptables -D INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('iptables -D FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu');
   });
 });
+
 

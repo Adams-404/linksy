@@ -583,3 +583,95 @@ Linksy v1.5.4 implements two defensive tiers that guarantee reliable, zero-touch
 3. **Top-Level CLI Prominence & Implicit Wi-Fi Flag**:
    - `linksy --help` now displays `$ linksy on --wifi --band 2.4` (alias: `--2ghz`) and `$ linksy on --wifi --band 5` (alias: `--5ghz`).
    - Running `linksy on --2ghz`, `linksy on --5ghz`, or `linksy on --band <band>` automatically activates `--wifi` mode.
+
+---
+
+## 16. Windows Client Compatibility: TCP MSS Clamping, RFC 2132 DHCP Options, IPv6 Suppression, and NCSI Verification (Released in v1.5.5)
+
+### 16.1 Symptom
+When a Linksy concurrent Wi-Fi hotspot (`ap0`) is hosted on Linux, Linux and Android client devices connect and browse the internet seamlessly. However, when a **Windows client device** (Windows 10 or Windows 11 laptop/desktop) connects to the same hotspot:
+- Windows reports **"No Internet, secured"** with an exclamation mark or globe icon.
+- Websites fail to load in Edge, Chrome, or Firefox (resulting in `ERR_CONNECTION_TIMED_OUT` or indefinite spinning).
+- Windows Network Connectivity Status Indicator (NCSI) active probes fail, causing Windows Network List Service (`netprofm`) to treat the interface as offline and drop outbound traffic.
+
+### 16.2 Technical Root Cause Analysis
+
+Windows' networking stack and connection verification architecture behave very differently from Linux and mobile Android clients:
+
+1. **Path MTU Discovery (PMTU) Black Hole & Missing TCP MSS Clamping**:
+   - **The Mechanism**: Windows operates with a default MTU of 1500 bytes and advertises a TCP Maximum Segment Size (MSS) of 1460 bytes. Path MTU Discovery Black Hole detection is disabled by default in Windows (`EnablePMTUBHDetect=0`).
+   - **The Failure**: When the Linux laptop routes traffic between `ap0` and its upstream Wi-Fi interface (or upstream mobile hotspots, PPPoE connections, VPN tunnels, or 4G/5G modems), intermediate links often have an effective MTU below 1500 (e.g. 1492 for PPPoE, 1420–1440 for cellular tethering).
+   - When a Windows client initiates an HTTP/TLS connection:
+     - The initial TCP 3-way handshake (SYN, SYN-ACK, ACK) succeeds because packet sizes are small (~60–80 bytes).
+     - As soon as the server sends full-sized response packets or Windows sends a large TLS ClientHello (> 1460 bytes), intermediate network nodes drop the oversized packet.
+     - Because many modern routers and firewalls drop ICMP Type 3 Code 4 (*Destination Unreachable: Fragmentation Needed*), neither endpoint is notified of the drop.
+     - **Why Android/Linux worked**: Mobile Android kernels and modern Linux distributions have `net.ipv4.tcp_mtu_probing` enabled by default or negotiate smaller TCP window sizes. Windows sat waiting indefinitely for dropped segments.
+
+2. **IPv6 NCSI Stall & RFC 6724 Happy Eyeballs Delay**:
+   - On Windows, IPv6 is prioritized over IPv4 (RFC 6724 Default Address Selection).
+   - When `ap0` was initialized on the Linux host, the Linux kernel automatically assigned a link-local IPv6 address (`fe80::...`) and enabled IPv6 listening.
+   - When Windows associated with `ap0`, it detected IPv6 capability and attempted IPv6 NCSI probes (`ipv6.msftconnecttest.com` and DNS AAAA lookups).
+   - Because Linksy only provides IPv4 NAT forwarding (`192.168.42.0/24`), every IPv6 request timed out. Windows browsers attempted to connect to dual-stack IPv6 endpoints first, incurring 20+ second connection timeouts per domain before falling back, creating the appearance of complete network failure.
+
+3. **Missing RFC 2132 DHCP Options**:
+   - Windows DHCP Client (`dhcpcore.dll`) strictly expects explicit RFC 2132 DHCP options:
+     - **Option 1**: Subnet Mask (`255.255.255.0`)
+     - **Option 3**: Router / Gateway IP (`192.168.42.1`)
+     - **Option 6**: Domain Name Server (`192.168.42.1, 1.1.1.1, 8.8.8.8`)
+     - **Option 28**: Broadcast Address (`192.168.42.255`)
+   - Without Option 1 and Option 28 explicitly declared in `dnsmasq`, Windows fails to establish its local routing table broadcast entries correctly.
+
+4. **DNS Filtering on Upstream Networks**:
+   - Linksy previously passed `--dhcp-option=6,1.1.1.1,8.8.8.8` directly to clients.
+   - If the upstream Wi-Fi network (hotels, universities, corporate routers) blocked outbound UDP port 53 to non-ISP nameservers, clients could not resolve any domain names.
+   - Dnsmasq was running with `--conf-file=/dev/null` without explicit upstream DNS forwarders, preventing clients querying `192.168.42.1` from resolving.
+
+5. **ICMP Echo Suppression**:
+   - Windows NCSI pings the default gateway (`192.168.42.1`) during connectivity checks.
+   - Without explicit `iptables -I INPUT -i ap0 -p icmp -j ACCEPT` rules, default input firewall drop policies rejected gateway pings.
+
+### 16.3 The Architectural Solution (v1.5.5)
+
+To guarantee flawless plug-and-play internet access for Windows clients without breaking or changing anything for Linux/Android users:
+
+1. **TCP MSS Clamping in iptables Mangle Chain**:
+   Added MSS clamping to the `FORWARD` chain in the `mangle` table:
+   ```bash
+   iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+   ```
+   This automatically inspects and rewrites the Maximum Segment Size inside TCP SYN packets passing through the laptop so they never exceed the path MTU. This completely eliminates MTU black hole drops on Windows.
+
+2. **IPv6 Suppression on Virtual AP Interface**:
+   ```bash
+   sysctl -w net.ipv6.conf."$AP_IFACE".disable_ipv6=1 >/dev/null 2>&1 || true
+   ip -6 addr flush dev "$AP_IFACE" 2>/dev/null || true
+   ```
+   By disabling IPv6 on `ap0`, the Linux host signals to Windows that the network is IPv4-only. Windows immediately bypasses IPv6 NCSI and Happy Eyeballs delays, directing all traffic over IPv4 with zero latency.
+
+3. **Explicit RFC 2132 DHCP Options in `dnsmasq`**:
+   Configured `dnsmasq` with standard DHCP options:
+   - `--dhcp-option=1,255.255.255.0` (Subnet mask)
+   - `--dhcp-option=3,192.168.42.1` (Gateway)
+   - `--dhcp-option=6,192.168.42.1,1.1.1.1,8.8.8.8` (Gateway DNS + external fallbacks)
+   - `--dhcp-option=28,192.168.42.255` (Broadcast address)
+
+4. **Upstream DNS Integration**:
+   Dnsmasq is provided with the host's actual upstream DNS resolvers (detecting `/run/systemd/resolve/resolv.conf` from NetworkManager/systemd-resolved) alongside public fallbacks:
+   ```bash
+   RESOLV_CONF="/etc/resolv.conf"
+   if [ -f "/run/systemd/resolve/resolv.conf" ]; then
+     RESOLV_CONF="/run/systemd/resolve/resolv.conf"
+   fi
+   dnsmasq ... --resolv-file="$RESOLV_CONF" --server=1.1.1.1 --server=8.8.8.8
+   ```
+
+5. **ICMP Ping Acceptance**:
+   Explicitly accepted ICMP traffic on `INPUT` and `FORWARD` chains:
+   ```bash
+   iptables -I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
+   iptables -I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
+   ```
+
+6. **Mirrored in Bluetooth PAN (`bluetoothPan.js`)**:
+   The same TCP MSS clamping, ICMP rules, resolv-file upstream resolution, and RFC 2132 DHCP options were applied to the Bluetooth PAN bridge (`pan0`), ensuring Windows clients connecting via Bluetooth also enjoy full internet connectivity.
+

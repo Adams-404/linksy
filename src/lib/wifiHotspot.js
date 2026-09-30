@@ -1005,6 +1005,10 @@ nmcli device set "$AP_IFACE" managed no 2>/dev/null || true
 ip link set "$AP_IFACE" down 2>/dev/null || true
 ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 
+# Disable IPv6 on virtual AP interface to prevent Windows clients from stalling on IPv6 NCSI / DNS / TCP timeouts
+sysctl -w net.ipv6.conf."$AP_IFACE".disable_ipv6=1 >/dev/null 2>&1 || true
+ip -6 addr flush dev "$AP_IFACE" 2>/dev/null || true
+
 # 5. Enable IP forwarding and firewall/NAT rules
 sysctl -w net.ipv4.ip_forward=1 >/dev/null
 
@@ -1016,7 +1020,7 @@ fi
 # Apply any blacklist drop rules
 if [ -f "$DENY_FILE" ]; then
   while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\\r\\n ')
+    mac=$(echo "$mac" | tr -d '\r\n ')
     if [ -n "$mac" ]; then
       iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
       iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
@@ -1024,13 +1028,16 @@ if [ -f "$DENY_FILE" ]; then
   done < "$DENY_FILE"
 fi
 
-# Insert explicit iptables rules for DHCP, DNS, and NAT routing
+# Insert explicit iptables rules for DHCP, DNS, ICMP, and NAT routing
 iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
+iptables -I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
+iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
   iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
 
 # 6. Start hostapd in daemon mode with PID file
@@ -1050,13 +1057,24 @@ pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
 pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
 sleep 0.5
 
-dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \\
-  --interface="$AP_IFACE" \\
-  --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \\
-  --dhcp-option=3,192.168.42.1 \\
-  --dhcp-option=6,1.1.1.1,8.8.8.8 \\
-  --dhcp-leasefile="$LEASES_FILE" \\
-  --log-dhcp \\
+# Detect upstream DNS servers (systemd-resolved / NetworkManager or /etc/resolv.conf)
+RESOLV_CONF="/etc/resolv.conf"
+if [ -f "/run/systemd/resolve/resolv.conf" ]; then
+  RESOLV_CONF="/run/systemd/resolve/resolv.conf"
+fi
+
+dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \
+  --interface="$AP_IFACE" \
+  --resolv-file="$RESOLV_CONF" \
+  --server=1.1.1.1 \
+  --server=8.8.8.8 \
+  --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \
+  --dhcp-option=1,255.255.255.0 \
+  --dhcp-option=3,192.168.42.1 \
+  --dhcp-option=6,192.168.42.1,1.1.1.1,8.8.8.8 \
+  --dhcp-option=28,192.168.42.255 \
+  --dhcp-leasefile="$LEASES_FILE" \
+  --log-dhcp \
   --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
 `;
 }
@@ -1105,8 +1123,11 @@ fi
 iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
 iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
+iptables -D INPUT -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
 iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
+iptables -D FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
+iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
 iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
@@ -1437,6 +1458,7 @@ export function stopWifiHotspot() {
         rm -f "${WIFI_PID_FILE}"
       fi
       killall -9 hostapd 2>/dev/null || true
+      iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
       iw dev ap0 del 2>/dev/null || true
     `], { stdio: 'ignore' });
   } catch {}
