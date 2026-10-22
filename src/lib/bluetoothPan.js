@@ -3,12 +3,18 @@ import path from 'node:path';
 import { execSync, spawnSync } from 'node:child_process';
 import chalk from 'chalk';
 import {
-  LINKSY_DIR,
   BT_DIR,
   BT_PID_FILE,
-  BT_LOG_FILE
+  BT_LOG_FILE,
+  BT_DNSMASQ_PID_FILE,
+  BT_DNSMASQ_LEASES_FILE
 } from './paths.js';
 import { getActiveWifiConnection } from './wifiHotspot.js';
+import {
+  generateFirewallSetupScript,
+  generateFirewallTeardownScript,
+  generateDnsDiscoveryScript
+} from './firewall.js';
 import { logger } from '../utils/logger.js';
 
 /**
@@ -60,26 +66,234 @@ export function checkBluetoothAvailability() {
 }
 
 /**
+ * Resolves the BlueZ D-Bus object path of the Bluetooth controller
+ * (e.g. /org/bluez/hci0). Hardcoding hci0 broke machines whose adapter is
+ * enumerated as hci1 or later (USB dongles, some laptops).
+ * @param {string} [controllerLabel] Value returned by checkBluetoothAvailability().controller
+ * @returns {string}
+ */
+export function getBluetoothControllerPath(controllerLabel = '') {
+  const macMatch = String(controllerLabel).match(/([0-9a-f]{2}(?::[0-9a-f]{2}){5})/i);
+  const wantedMac = macMatch ? macMatch[1].toLowerCase() : null;
+  const candidates = [];
+
+  try {
+    for (const entry of fs.readdirSync('/sys/class/bluetooth')) {
+      if (/^hci\d+$/.test(entry)) candidates.push(entry);
+    }
+  } catch {}
+
+  candidates.sort((a, b) => parseInt(a.slice(3), 10) - parseInt(b.slice(3), 10));
+
+  if (wantedMac) {
+    for (const entry of candidates) {
+      try {
+        const address = fs.readFileSync(`/sys/class/bluetooth/${entry}/address`, 'utf8').trim().toLowerCase();
+        if (address === wantedMac) return `/org/bluez/${entry}`;
+      } catch {}
+    }
+  }
+
+  if (candidates.length > 0) {
+    return `/org/bluez/${candidates[0]}`;
+  }
+
+  // Fallback: ask BlueZ itself which controller objects exist.
+  try {
+    const tree = execSync('busctl tree org.bluez --no-pager', {
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'ignore']
+    });
+    const match = tree.match(/\/org\/bluez\/hci\d+/);
+    if (match) return match[0];
+  } catch {}
+
+  return '/org/bluez/hci0';
+}
+
+/**
+ * Reads the PID of the running PAN dnsmasq daemon.
+ * Checks the current /run/linksy location first, then the legacy ~/.linksy path
+ * so an older Linksy install can still be detected (and stopped).
+ * @returns {number|null}
+ */
+function readBluetoothPid() {
+  for (const pidFile of [BT_DNSMASQ_PID_FILE, BT_PID_FILE]) {
+    let raw;
+    try {
+      raw = fs.readFileSync(pidFile, 'utf8').trim();
+    } catch {
+      continue;
+    }
+    const pid = parseInt(raw, 10);
+    if (!Number.isInteger(pid) || pid <= 0) continue;
+    try {
+      process.kill(pid, 0);
+      return pid;
+    } catch (err) {
+      if (err.code === 'EPERM') return pid;
+    }
+  }
+  return null;
+}
+
+/**
  * Checks if Bluetooth PAN tethering service is currently active.
  * @returns {boolean}
  */
 export function isBluetoothPanRunning() {
-  if (!fs.existsSync(BT_PID_FILE)) {
-    return false;
-  }
-  try {
-    const rawPid = fs.readFileSync(BT_PID_FILE, 'utf8').trim();
-    const pid = parseInt(rawPid, 10);
-    if (!isNaN(pid) && pid > 0) {
-      try {
-        process.kill(pid, 0);
-        return true;
-      } catch (err) {
-        return err.code === 'EPERM';
-      }
-    }
-  } catch {}
-  return false;
+  return readBluetoothPid() !== null;
+}
+
+/**
+ * Generates the start-pan.sh bash script content.
+ * @param {{ upstreamIface: string, bridge?: string, controllerPath?: string }} options
+ * @returns {string}
+ */
+export function generateBluetoothStartScript({
+  upstreamIface,
+  bridge = 'pan0',
+  controllerPath = '/org/bluez/hci0'
+} = {}) {
+  return `#!/usr/bin/env bash
+set -e
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+IFACE="${upstreamIface}"
+BRIDGE="${bridge}"
+AP_IFACE="$BRIDGE"
+DENY_FILE=""
+PID_FILE="${BT_DNSMASQ_PID_FILE}"
+LEGACY_PID_FILE="${BT_PID_FILE}"
+LOG_FILE="${BT_LOG_FILE}"
+
+: > "$LOG_FILE" 2>/dev/null || true
+
+# 1. Make sure the adapter is powered and discoverable
+rfkill unblock bluetooth 2>/dev/null || true
+bluetoothctl power on 2>/dev/null || true
+bluetoothctl discoverable on 2>/dev/null || true
+
+# 2. Recreate the PAN bridge so stale addresses/routes do not linger
+ip link set "$BRIDGE" down 2>/dev/null || true
+ip link delete "$BRIDGE" type bridge 2>/dev/null || true
+ip link add name "$BRIDGE" type bridge 2>/dev/null || true
+ip addr flush dev "$BRIDGE" 2>/dev/null || true
+ip addr add 10.42.0.1/24 dev "$BRIDGE"
+ip link set "$BRIDGE" up
+
+# 3. Register the BlueZ NAP server on the real controller path
+busctl call org.bluez "${controllerPath}" org.bluez.NetworkServer1 Register ss "nap" "$BRIDGE" 2>/dev/null || true
+
+# 4. Enable IP forwarding, open the firewall and set up NAT
+${generateFirewallSetupScript({ subnet: '10.42.0.0/24' })}
+
+# 5. Discover the real upstream DNS servers
+${generateDnsDiscoveryScript()}
+
+# dnsmasq drops privileges after startup, so its runtime files live in
+# /run/linksy (mode 755) rather than inside the user's private home directory.
+mkdir -p "$RUN_DIR" 2>/dev/null || true
+chmod 755 "$RUN_DIR" 2>/dev/null || true
+: > "${BT_DNSMASQ_LEASES_FILE}" 2>/dev/null || true
+chmod 666 "${BT_DNSMASQ_LEASES_FILE}" 2>/dev/null || true
+: > "$PID_FILE" 2>/dev/null || true
+chmod 666 "$PID_FILE" 2>/dev/null || true
+
+# Stop a dnsmasq left over from a previous or interrupted run; it would hold
+# port 53 and make the new instance fail to start.
+for _pid_file in "$PID_FILE" "$LEGACY_PID_FILE"; do
+  if [ -f "$_pid_file" ]; then
+    kill -9 "$(cat "$_pid_file" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$_pid_file"
+  fi
+done
+pkill -9 -f "dnsmasq.*--interface=$AP_IFACE" 2>/dev/null || true
+
+DNSMASQ_FALLBACK_SERVERS=""
+if [ -z "$DNS_SERVERS" ]; then
+  DNSMASQ_FALLBACK_SERVERS="--server=1.1.1.1 --server=8.8.8.8"
+fi
+
+DNSMASQ_RC=0
+dnsmasq --conf-file=/dev/null --no-hosts --bind-interfaces \\
+  --except-interface=lo --interface="$BRIDGE" \\
+  --resolv-file="$RUN_DIR/upstream-dns.conf" \\
+  $DNSMASQ_FALLBACK_SERVERS \\
+  --dhcp-range=10.42.0.10,10.42.0.100,255.255.255.0,12h \\
+  --dhcp-option=1,255.255.255.0 \\
+  --dhcp-option=3,10.42.0.1 \\
+  --dhcp-option=6,10.42.0.1 \\
+  --dhcp-option=28,10.42.0.255 \\
+  --dhcp-leasefile="${BT_DNSMASQ_LEASES_FILE}" \\
+  --log-dhcp \\
+  --pid-file="$PID_FILE" >> "$LOG_FILE" 2>&1 || DNSMASQ_RC=$?
+
+if [ "$DNSMASQ_RC" -ne 0 ]; then
+  echo "Linksy: dnsmasq failed to start (exit $DNSMASQ_RC), so your phone would get no IP address." >&2
+  echo "Linksy: see $LOG_FILE for details. Port 53 may already be in use by another DNS server." >&2
+  exit 1
+fi
+
+sleep 0.5
+DNSMASQ_RUNNING=0
+if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  DNSMASQ_RUNNING=1
+fi
+if [ "$DNSMASQ_RUNNING" = "0" ] && pgrep -f "dnsmasq.*--interface=$AP_IFACE" >/dev/null 2>&1; then
+  DNSMASQ_RUNNING=1
+fi
+if [ "$DNSMASQ_RUNNING" = "0" ]; then
+  echo "Linksy: dnsmasq did not stay running, so your phone would get no IP address." >&2
+  echo "Linksy: see $LOG_FILE for details." >&2
+  exit 1
+fi
+
+if [ "$NAT_OK" != "1" ]; then
+  echo "Linksy: warning - the NAT rule could not be verified, so your phone may connect without internet." >&2
+  echo "Linksy: run 'linksy doctor' and make sure your firewall forwards traffic from 10.42.0.0/24." >&2
+fi
+`;
+}
+
+/**
+ * Generates the stop-pan.sh bash script content.
+ * @param {{ upstreamIface: string, bridge?: string, controllerPath?: string }} options
+ * @returns {string}
+ */
+export function generateBluetoothStopScript({
+  upstreamIface,
+  bridge = 'pan0',
+  controllerPath = '/org/bluez/hci0'
+} = {}) {
+  return `#!/usr/bin/env bash
+export PATH="/usr/local/sbin:/usr/sbin:/sbin:$PATH"
+IFACE="${upstreamIface}"
+BRIDGE="${bridge}"
+AP_IFACE="$BRIDGE"
+DENY_FILE=""
+PID_FILE="${BT_DNSMASQ_PID_FILE}"
+LEGACY_PID_FILE="${BT_PID_FILE}"
+
+for _pid_file in "$PID_FILE" "$LEGACY_PID_FILE"; do
+  if [ -f "$_pid_file" ]; then
+    kill "$(cat "$_pid_file" 2>/dev/null)" 2>/dev/null || true
+    rm -f "$_pid_file"
+  fi
+done
+pkill -9 -f "dnsmasq.*--interface=$AP_IFACE" 2>/dev/null || true
+
+busctl call org.bluez "${controllerPath}" org.bluez.NetworkServer1 Unregister s "nap" 2>/dev/null || true
+
+# Remove firewall/NAT rules for every uplink Linksy may have used
+${generateFirewallTeardownScript()}
+
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld >/dev/null 2>&1; then
+  firewall-cmd --zone=trusted --remove-interface="$BRIDGE" 2>/dev/null || true
+fi
+
+ip link set "$BRIDGE" down 2>/dev/null || true
+ip link delete "$BRIDGE" type bridge 2>/dev/null || true
+`;
 }
 
 /**
@@ -139,97 +353,10 @@ export async function startBluetoothPan(options = {}) {
   const bridge = options.bridge || 'pan0';
   const startScriptPath = path.join(BT_DIR, 'start-bluetooth.sh');
   const stopScriptPath = path.join(BT_DIR, 'stop-bluetooth.sh');
+  const controllerPath = getBluetoothControllerPath(btCheck.controller);
 
-  const startScript = `#!/usr/bin/env bash
-set -e
-IFACE="${upstreamIface}"
-BRIDGE="${bridge}"
-PID_FILE="${BT_PID_FILE}"
-LOG_FILE="${BT_LOG_FILE}"
-
-# 1. Ensure Bluetooth power
-rfkill unblock bluetooth 2>/dev/null || true
-bluetoothctl power on 2>/dev/null || true
-bluetoothctl discoverable on 2>/dev/null || true
-
-# 2. Setup network bridge
-ip link add name "$BRIDGE" type bridge 2>/dev/null || true
-ip addr flush dev "$BRIDGE" 2>/dev/null || true
-ip addr add 10.42.0.1/24 dev "$BRIDGE"
-ip link set "$BRIDGE" up
-
-# 3. Register BlueZ NetworkServer NAP service
-busctl call org.bluez /org/bluez/hci0 org.bluez.NetworkServer1 Register ss "nap" "$BRIDGE" 2>/dev/null || true
-
-# 4. Enable IP forwarding and firewall/NAT
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-# If firewalld is active, assign bridge interface to trusted zone
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-  firewall-cmd --zone=trusted --add-interface="$BRIDGE" 2>/dev/null || true
-fi
-
-# Insert explicit iptables rules for DHCP, DNS, ICMP and NAT
-iptables -I INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \\
-  iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
-
-# 5. Start dnsmasq DHCP server for Bluetooth subnet
-RESOLV_CONF="/etc/resolv.conf"
-if [ -f "/run/systemd/resolve/resolv.conf" ]; then
-  RESOLV_CONF="/run/systemd/resolve/resolv.conf"
-fi
-
-dnsmasq --conf-file=/dev/null --no-hosts --bind-interfaces \\
-  --except-interface=lo --interface="$BRIDGE" \\
-  --resolv-file="$RESOLV_CONF" \\
-  --server=1.1.1.1 --server=8.8.8.8 \\
-  --dhcp-range=10.42.0.10,10.42.0.100,255.255.255.0,12h \\
-  --dhcp-option=1,255.255.255.0 \\
-  --dhcp-option=3,10.42.0.1 \\
-  --dhcp-option=6,10.42.0.1,1.1.1.1,8.8.8.8 \\
-  --dhcp-option=28,10.42.0.255 \\
-  --log-dhcp \\
-  --pid-file="$PID_FILE" >> "$LOG_FILE" 2>&1
-`;
-
-  const stopScript = `#!/usr/bin/env bash
-IFACE="${upstreamIface}"
-BRIDGE="${bridge}"
-PID_FILE="${BT_PID_FILE}"
-
-if [ -f "$PID_FILE" ]; then
-  kill "$(cat "$PID_FILE")" 2>/dev/null || true
-  rm -f "$PID_FILE"
-fi
-
-busctl call org.bluez /org/bluez/hci0 org.bluez.NetworkServer1 Unregister s "nap" 2>/dev/null || true
-
-# Remove from firewalld trusted zone if present
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-  firewall-cmd --zone=trusted --remove-interface="$BRIDGE" 2>/dev/null || true
-fi
-
-iptables -D INPUT -i "$BRIDGE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$BRIDGE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$BRIDGE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$BRIDGE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$IFACE" -o "$BRIDGE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$BRIDGE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
-
-ip link set "$BRIDGE" down 2>/dev/null || true
-ip link delete "$BRIDGE" type bridge 2>/dev/null || true
-`;
+  const startScript = generateBluetoothStartScript({ upstreamIface, bridge, controllerPath });
+  const stopScript = generateBluetoothStopScript({ upstreamIface, bridge, controllerPath });
 
   fs.writeFileSync(startScriptPath, startScript, { mode: 0o755 });
   fs.writeFileSync(stopScriptPath, stopScript, { mode: 0o755 });
@@ -270,7 +397,9 @@ export function stopBluetoothPan() {
   }
 
   try {
-    if (fs.existsSync(BT_PID_FILE)) fs.unlinkSync(BT_PID_FILE);
+    for (const pidFile of [BT_DNSMASQ_PID_FILE, BT_PID_FILE]) {
+      if (fs.existsSync(pidFile)) fs.unlinkSync(pidFile);
+    }
   } catch {}
 
   logger.success('Bluetooth PAN service stopped.');
@@ -281,12 +410,6 @@ export function stopBluetoothPan() {
  * @returns {{ running: boolean, pid: number|null, bridge: string }}
  */
 export function getBluetoothPanStatus() {
-  const running = isBluetoothPanRunning();
-  let pid = null;
-  if (fs.existsSync(BT_PID_FILE)) {
-    try {
-      pid = parseInt(fs.readFileSync(BT_PID_FILE, 'utf8').trim(), 10) || null;
-    } catch {}
-  }
-  return { running, pid, bridge: 'pan0' };
+  const pid = readBluetoothPid();
+  return { running: pid !== null, pid, bridge: 'pan0' };
 }
