@@ -558,7 +558,7 @@ describe('wifiHotspot - isHotspotRunning', () => {
 });
 
 describe('wifiHotspot - script generation', () => {
-  it('generates valid start script with robust dnsmasq cleanup and escaped variables', () => {
+  it('generates a start script with backend-agnostic firewall and DNS setup', () => {
     const script = generateStartScript({
       activeWifi: { iface: 'wlp0s20f3', channel: 6, hwMode: 'g' },
       apIface: 'ap0',
@@ -570,12 +570,11 @@ describe('wifiHotspot - script generation', () => {
     expect(script).toContain('kill -9 "$(cat "${PID_FILE}.dnsmasq")"');
     expect(script).toContain('pkill -9 -f "dnsmasq.*--interface=${AP_IFACE}"');
     expect(script).toContain('pkill -9 -f "dnsmasq.*192\\.168\\.42\\."');
-    expect(script).toContain('--pid-file="${PID_FILE}.dnsmasq"');
     expect(script).toContain('ADMIN_GROUP="wheel"');
     expect(script).not.toContain('undefined');
 
     // Windows client compatibility assertions:
-    // 1. TCP MSS clamping in iptables mangle table (prevents PMTU black hole drops)
+    // 1. TCP MSS clamping (prevents PMTU black hole drops)
     expect(script).toContain('-t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu');
 
     // 2. Disabling IPv6 on virtual AP interface (prevents Windows dual-stack NCSI/DNS/TCP timeouts)
@@ -583,22 +582,60 @@ describe('wifiHotspot - script generation', () => {
     expect(script).toContain('ip -6 addr flush dev "$AP_IFACE"');
 
     // 3. ICMP ping acceptance (allows Windows gateway connectivity verification)
-    expect(script).toContain('iptables -I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
-    expect(script).toContain('iptables -I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('-I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('-I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT');
 
     // 4. Explicit RFC 2132 DHCP options (subnet mask, router, gateway DNS, broadcast)
     expect(script).toContain('--dhcp-option=1,255.255.255.0');
     expect(script).toContain('--dhcp-option=3,192.168.42.1');
-    expect(script).toContain('--dhcp-option=6,192.168.42.1,1.1.1.1,8.8.8.8');
+    expect(script).toContain('--dhcp-option=6,192.168.42.1');
     expect(script).toContain('--dhcp-option=28,192.168.42.255');
 
-    // 5. Upstream DNS servers and resolv.conf integration
-    expect(script).toContain('--resolv-file="$RESOLV_CONF"');
+    // 5. Kali fix: never assume iptables exists, and never fight the xtables lock
+    expect(script).toContain('for _candidate in iptables iptables-nft; do');
+    expect(script).toContain('"$IPT_BIN" -w 5 "$@"');
+
+    // 6. Kali fix: nft-only fallback with its own NAT table
+    expect(script).toContain('add table ip linksy_nat');
+    expect(script).toContain('flush chain ip linksy_nat postrouting');
+    expect(script).toContain('masquerade comment "linksy"');
+
+    // 7. Kali fix: punch holes through nftables drop-policy forward/input chains
+    expect(script).toContain('nft_drop_chains forward');
+    expect(script).toContain('nft_drop_chains input');
+    expect(script).toContain('accept comment "linksy"');
+
+    // 8. Kali fix: ufw (defaults to dropping forwarded traffic) and firewalld
+    expect(script).toContain('ufw route allow in on "$AP_IFACE" out on "$_uplink"');
+    expect(script).toContain('firewall-cmd --zone=trusted --add-interface="$AP_IFACE"');
+
+    // 9. Uplinks = default-route device plus the Wi-Fi interface (VPN / VM / USB modem)
+    expect(script).toContain('ip -4 route show default');
+    expect(script).toContain('add_uplink "$DEFAULT_ROUTE_IFACE"');
+    expect(script).toContain('MASQUERADE');
+
+    // 10. DNS: Linksy-managed resolv file readable by the dnsmasq user, fed from
+    // NetworkManager first because Kali has no systemd-resolved
+    expect(script).toContain('--resolv-file="$RUN_DIR/upstream-dns.conf"');
+    expect(script).toContain('/run/NetworkManager/resolv.conf');
+    expect(script).toContain('/run/systemd/resolve/resolv.conf');
     expect(script).toContain('--server=1.1.1.1');
     expect(script).toContain('--server=8.8.8.8');
+    expect(script).toContain('--pid-file="$DNSMASQ_PID_FILE"');
+
+    // Public resolvers are only used when discovery found nothing, so they
+    // cannot race (and poison) split-horizon/private DNS answers.
+    expect(script).toContain('if [ -z "$DNS_SERVERS" ]; then');
+    expect(script).toContain('DNSMASQ_FALLBACK_SERVERS="--server=1.1.1.1 --server=8.8.8.8"');
+
+    // 11. Runtime state so status/doctor can report broken NAT
+    expect(script).toContain('echo "NAT_BACKEND=$NAT_BACKEND"');
+    expect(script).toContain('echo "NAT_OK=$NAT_OK"');
+    expect(script).toContain('echo "UPLINKS=$UPLINKS"');
+    expect(script).toContain('echo "DNSMASQ_RUNNING=$DNSMASQ_RUNNING"');
   });
 
-  it('generates valid stop script with robust dnsmasq cleanup and escaped variables', () => {
+  it('generates a stop script that removes rules for every uplink and backend', () => {
     const script = generateStopScript({
       iface: 'wlp0s20f3',
       apIface: 'ap0'
@@ -613,10 +650,17 @@ describe('wifiHotspot - script generation', () => {
     expect(script).toContain('iw dev "$AP_IFACE" del');
     expect(script).not.toContain('undefined');
 
-    // Clean up rules on teardown
-    expect(script).toContain('iptables -D INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
-    expect(script).toContain('iptables -D FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT');
-    expect(script).toContain('iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu');
+    // Clean up rules on teardown, including stale rules from a previous run
+    expect(script).toContain('ipt_del_all -D INPUT -i "$AP_IFACE" -p icmp -j ACCEPT');
+    expect(script).toContain('-t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu');
+    expect(script).toContain('-t nat -D POSTROUTING -o "$_uplink" -j MASQUERADE');
+    expect(script).toContain('for _candidate in iptables iptables-nft; do');
+
+    // Also undo ufw, nftables and state changes
+    expect(script).toContain('ufw route delete allow in on "$AP_IFACE"');
+    expect(script).toContain('nft delete rule "$_family" "$_table" "$_chain" handle "$_handle"');
+    expect(script).toContain('nft delete table ip linksy_nat');
+    expect(script).toContain('rm -f "$STATE_FILE"');
   });
 });
 

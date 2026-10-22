@@ -12,11 +12,22 @@ import {
   WIFI_LEASES_FILE,
   WIFI_DENY_FILE,
   WIFI_ACCEPT_FILE,
+  WIFI_DNSMASQ_PID_FILE,
+  WIFI_STATE_FILE,
   HOSTAPD_CTRL_DIR
 } from './paths.js';
 import { getSavedConfig, saveConfig } from './config.js';
 import { detectPackageManager } from './detectPackageManager.js';
 import { getWifiInterfaceName } from './checkWifiCapability.js';
+import {
+  generateFirewallSetupScript,
+  generateFirewallTeardownScript,
+  generateDnsDiscoveryScript,
+  generateStateWriteScript,
+  isFirewallToolInstalled,
+  getFirewallPackageName,
+  readFirewallState
+} from './firewall.js';
 import { logger } from '../utils/logger.js';
 
 const PID_FILE = WIFI_PID_FILE;
@@ -871,14 +882,33 @@ export function isHotspotRunning() {
 }
 
 /**
- * Ensures required packages (iw, hostapd, dnsmasq) are installed, auto-installing if missing.
+ * Ensures required packages (iw, hostapd, dnsmasq, iptables/nftables) are
+ * installed, auto-installing if missing.
  * @returns {boolean}
  */
 export function ensureWifiDependencies() {
   const missing = [];
-  if (!isIwInstalled()) missing.push('iw');
-  if (!isHostapdInstalled()) missing.push('hostapd');
-  if (!isDnsmasqInstalled()) missing.push('dnsmasq');
+  const missingPackages = [];
+
+  if (!isIwInstalled()) {
+    missing.push('iw');
+    missingPackages.push('iw');
+  }
+  if (!isHostapdInstalled()) {
+    missing.push('hostapd');
+    missingPackages.push('hostapd');
+  }
+  if (!isDnsmasqInstalled()) {
+    missing.push('dnsmasq');
+    missingPackages.push('dnsmasq');
+  }
+
+  // NAT needs a firewall backend. Kali ships iptables as "optional" and
+  // nftables as "important", so some Kali installs have neither.
+  const firewallMissing = !isFirewallToolInstalled();
+  if (firewallMissing) {
+    missing.push('iptables or nftables');
+  }
 
   if (missing.length === 0) {
     return true;
@@ -889,28 +919,40 @@ export function ensureWifiDependencies() {
 
   if (!pm) {
     logger.error('Could not automatically detect a supported package manager (supported: DNF, APT, Pacman, Zypper).');
+    if (firewallMissing) {
+      logger.info('Also install iptables (Kali/Debian/Ubuntu) or iptables-nft (Fedora/Arch): without either one the hotspot turns on, but phones get no internet.');
+    }
     logger.info(`Please install ${missing.join(', ')} manually using your distribution package manager.`);
     return false;
   }
 
+  if (firewallMissing) {
+    const firewallPackage = getFirewallPackageName(pm.type);
+    if (firewallPackage) {
+      missingPackages.push(firewallPackage);
+    }
+  }
+
+  const packagesToInstall = missingPackages.length > 0 ? missingPackages : missing;
+
   logger.info(`Detected package manager: ${pm.name}`);
-  logger.info(`Linksy will now automatically install ${chalk.cyan(missing.join(', '))}...`);
+  logger.info(`Linksy will now automatically install ${chalk.cyan(packagesToInstall.join(', '))}...`);
   logger.info('This operation requires elevated privileges (sudo).\n');
 
   try {
     let commandArray = [];
     if (pm.type === 'dnf') {
-      commandArray = ['dnf', 'install', '-y', ...missing];
+      commandArray = ['dnf', 'install', '-y', ...packagesToInstall];
     } else if (pm.type === 'apt') {
       if (pm.preCommandArray) {
         logger.info('Updating package lists...');
         spawnSync('sudo', pm.preCommandArray, { stdio: 'inherit' });
       }
-      commandArray = ['apt-get', 'install', '-y', ...missing];
+      commandArray = ['apt-get', 'install', '-y', ...packagesToInstall];
     } else if (pm.type === 'pacman') {
-      commandArray = ['pacman', '-S', '--noconfirm', ...missing];
+      commandArray = ['pacman', '-S', '--noconfirm', ...packagesToInstall];
     } else if (pm.type === 'zypper') {
-      commandArray = ['zypper', 'install', '-y', ...missing];
+      commandArray = ['zypper', 'install', '-y', ...packagesToInstall];
     }
 
     const result = spawnSync('sudo', commandArray, { stdio: 'inherit' });
@@ -922,9 +964,10 @@ export function ensureWifiDependencies() {
     const iwReady = !missing.includes('iw') || isIwInstalled();
     const hostapdReady = !missing.includes('hostapd') || isHostapdInstalled();
     const dnsmasqReady = !missing.includes('dnsmasq') || isDnsmasqInstalled();
+    const firewallReady = !firewallMissing || isFirewallToolInstalled();
 
-    if (iwReady && hostapdReady && dnsmasqReady) {
-      logger.success(`Successfully installed ${missing.join(', ')}!`);
+    if (iwReady && hostapdReady && dnsmasqReady && firewallReady) {
+      logger.success(`Successfully installed ${packagesToInstall.join(', ')}!`);
       return true;
     } else {
       logger.error('Installation finished, but dependencies could not be verified on PATH.');
@@ -1009,36 +1052,8 @@ ip addr flush dev "$AP_IFACE" 2>/dev/null || true
 sysctl -w net.ipv6.conf."$AP_IFACE".disable_ipv6=1 >/dev/null 2>&1 || true
 ip -6 addr flush dev "$AP_IFACE" 2>/dev/null || true
 
-# 5. Enable IP forwarding and firewall/NAT rules
-sysctl -w net.ipv4.ip_forward=1 >/dev/null
-
-# If firewalld is active, assign AP interface to trusted zone so DHCP, DNS, and traffic forwarding are permitted
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
-  firewall-cmd --zone=trusted --add-interface="$AP_IFACE" 2>/dev/null || true
-fi
-
-# Apply any blacklist drop rules
-if [ -f "$DENY_FILE" ]; then
-  while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\r\n ')
-    if [ -n "$mac" ]; then
-      iptables -I INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-      iptables -I FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-    fi
-  done < "$DENY_FILE"
-fi
-
-# Insert explicit iptables rules for DHCP, DNS, ICMP, and NAT routing
-iptables -I INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -I INPUT -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -I FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -t mangle -I FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t nat -C POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || \
-  iptables -t nat -A POSTROUTING -o "$IFACE" -j MASQUERADE
+# 5. Enable IP forwarding, open the firewall, and set up NAT
+${generateFirewallSetupScript()}
 
 # 6. Start hostapd in daemon mode with PID file
 hostapd -B -P "$PID_FILE" "$CONF" >> "$LOG_FILE" 2>&1
@@ -1057,25 +1072,64 @@ pkill -9 -f "dnsmasq.*--interface=\${AP_IFACE}" 2>/dev/null || true
 pkill -9 -f "dnsmasq.*192\\.168\\.42\\." 2>/dev/null || true
 sleep 0.5
 
-# Detect upstream DNS servers (systemd-resolved / NetworkManager or /etc/resolv.conf)
-RESOLV_CONF="/etc/resolv.conf"
-if [ -f "/run/systemd/resolve/resolv.conf" ]; then
-  RESOLV_CONF="/run/systemd/resolve/resolv.conf"
+# Stop a dnsmasq left over from this or an older Linksy version (the old
+# version kept the pid file in the home directory).
+if [ -f "\${PID_FILE}.dnsmasq" ]; then
+  kill -9 "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
+  rm -f "\${PID_FILE}.dnsmasq"
+fi
+if [ -f "$DNSMASQ_PID_FILE" ]; then
+  kill -9 "$(cat "$DNSMASQ_PID_FILE")" 2>/dev/null || true
+  rm -f "$DNSMASQ_PID_FILE"
 fi
 
+# Find the real upstream DNS servers (no systemd-resolved on Kali).
+${generateDnsDiscoveryScript()}
+
+# Runtime files must be writable by the unprivileged user dnsmasq switches to.
+: > "$LEASES_FILE" 2>/dev/null || true
+chmod 666 "$LEASES_FILE" 2>/dev/null || true
+: > "$DNSMASQ_PID_FILE" 2>/dev/null || true
+chmod 666 "$DNSMASQ_PID_FILE" 2>/dev/null || true
+
+# Only fall back to public resolvers when the machine has no usable upstream.
+# Mixing them in alongside the real upstream breaks split-horizon/private DNS
+# (and captive portals), because the public server wins the race with NXDOMAIN.
+DNSMASQ_FALLBACK_SERVERS=""
+if [ -z "$DNS_SERVERS" ]; then
+  DNSMASQ_FALLBACK_SERVERS="--server=1.1.1.1 --server=8.8.8.8"
+fi
+
+DNSMASQ_RC=0
 dnsmasq --conf-file=/dev/null --no-hosts --bind-dynamic \
   --interface="$AP_IFACE" \
-  --resolv-file="$RESOLV_CONF" \
-  --server=1.1.1.1 \
-  --server=8.8.8.8 \
+  --resolv-file="$RUN_DIR/upstream-dns.conf" \
+  $DNSMASQ_FALLBACK_SERVERS \
   --dhcp-range=192.168.42.10,192.168.42.100,255.255.255.0,12h \
   --dhcp-option=1,255.255.255.0 \
   --dhcp-option=3,192.168.42.1 \
-  --dhcp-option=6,192.168.42.1,1.1.1.1,8.8.8.8 \
+  --dhcp-option=6,192.168.42.1 \
   --dhcp-option=28,192.168.42.255 \
   --dhcp-leasefile="$LEASES_FILE" \
   --log-dhcp \
-  --pid-file="\${PID_FILE}.dnsmasq" >> "$LOG_FILE" 2>&1
+  --pid-file="$DNSMASQ_PID_FILE" >> "$LOG_FILE" 2>&1 || DNSMASQ_RC=$?
+
+if [ "$DNSMASQ_RC" -ne 0 ]; then
+  echo "Linksy: dnsmasq failed to start (exit $DNSMASQ_RC), so phones would get no IP address." >&2
+  echo "Linksy: see $LOG_FILE for details. Port 53 may already be in use by another DNS server." >&2
+  exit 1
+fi
+
+sleep 0.5
+DNSMASQ_RUNNING=0
+if [ -f "$DNSMASQ_PID_FILE" ] && kill -0 "$(cat "$DNSMASQ_PID_FILE" 2>/dev/null)" 2>/dev/null; then
+  DNSMASQ_RUNNING=1
+fi
+if [ "$DNSMASQ_RUNNING" = "0" ] && pgrep -f "dnsmasq.*--interface=$AP_IFACE" >/dev/null 2>&1; then
+  DNSMASQ_RUNNING=1
+fi
+
+${generateStateWriteScript()}
 `;
 }
 
@@ -1090,6 +1144,10 @@ AP_IFACE="${apIface}"
 PID_FILE="${WIFI_PID_FILE}"
 DENY_FILE="${WIFI_DENY_FILE}"
 
+if [ -f "${WIFI_DNSMASQ_PID_FILE}" ]; then
+  kill -9 "$(cat "${WIFI_DNSMASQ_PID_FILE}")" 2>/dev/null || true
+  rm -f "${WIFI_DNSMASQ_PID_FILE}"
+fi
 if [ -f "\${PID_FILE}.dnsmasq" ]; then
   kill -9 "$(cat "\${PID_FILE}.dnsmasq")" 2>/dev/null || true
   rm -f "\${PID_FILE}.dnsmasq"
@@ -1104,31 +1162,12 @@ fi
 
 killall -9 hostapd 2>/dev/null || true
 
-# Remove from firewalld trusted zone if present
-if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active firewalld >/dev/null 2>&1; then
+# Remove firewall/NAT rules for every uplink Linksy may have used
+${generateFirewallTeardownScript()}
+
+if command -v firewall-cmd >/dev/null 2>&1 && systemctl is-active --quiet firewalld >/dev/null 2>&1; then
   firewall-cmd --zone=trusted --remove-interface="$AP_IFACE" 2>/dev/null || true
 fi
-
-# Clean up blacklist rules if existing
-if [ -f "$DENY_FILE" ]; then
-  while read -r mac; do
-    mac=$(echo "$mac" | tr -d '\\r\\n ')
-    if [ -n "$mac" ]; then
-      iptables -D INPUT -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-      iptables -D FORWARD -i "$AP_IFACE" -m mac --mac-source "$mac" -j DROP 2>/dev/null || true
-    fi
-  done < "$DENY_FILE"
-fi
-
-iptables -D INPUT -i "$AP_IFACE" -p udp --dport 67:68 --sport 67:68 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$AP_IFACE" -p udp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$AP_IFACE" -p tcp --dport 53 -j ACCEPT 2>/dev/null || true
-iptables -D INPUT -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$AP_IFACE" -o "$IFACE" -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$IFACE" -o "$AP_IFACE" -m state --state RELATED,ESTABLISHED -j ACCEPT 2>/dev/null || true
-iptables -D FORWARD -i "$AP_IFACE" -p icmp -j ACCEPT 2>/dev/null || true
-iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
-iptables -t nat -D POSTROUTING -o "$IFACE" -j MASQUERADE 2>/dev/null || true
 
 rm -f /run/NetworkManager/conf.d/99-linksy.conf 2>/dev/null || true
 nmcli general reload conf 2>/dev/null || true
@@ -1136,6 +1175,40 @@ nmcli general reload conf 2>/dev/null || true
 nmcli device set "$AP_IFACE" managed yes 2>/dev/null || true
 iw dev "$AP_IFACE" del 2>/dev/null || true
 `;
+}
+
+/**
+ * Prints the hotspot details block plus the firewall/NAT outcome.
+ * @param {{ ssid: string, password: string|null, channel: number, hwMode: 'a'|'g' }} details
+ */
+function printHotspotDetails({ ssid, password, channel, hwMode }) {
+  const status = getWifiHotspotStatus();
+  const uplinkLabel = status.uplinks.length > 0 ? status.uplinks.join(', ') : 'unknown';
+  const natLabel = status.natBackend ? ` (NAT: ${status.natBackend})` : '';
+
+  console.log(
+    '\n' + chalk.bold.cyan('📡 Wi-Fi Hotspot Details:\n') +
+    `  • Network Name (SSID): ${chalk.bold.green(ssid)}\n` +
+    `  • Password:            ${password ? chalk.bold.yellow(password) : chalk.bold.magenta('None (Open Network)')}\n` +
+    `  • Channel:             ${chalk.cyan(channel)} (${hwMode === 'a' ? '5 GHz' : '2.4 GHz'})\n` +
+    `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n` +
+    `  • Internet via:        ${chalk.cyan(uplinkLabel)}${chalk.dim(natLabel)}\n\n` +
+    `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
+    `Or scan the QR code to connect instantly: ${chalk.bold.cyan('linksy qr')}\n\n` +
+    `Run ${chalk.bold.cyan('linksy off')} at any time to stop the hotspot.\n`
+  );
+
+  if (status.natOk) {
+    return;
+  }
+
+  logger.warn(chalk.yellow('Hotspot is running, but internet forwarding (NAT) could not be verified.'));
+  logger.info('Phones may connect to the Wi-Fi and still report "no internet".');
+  if (status.firewall && status.firewall !== 'none') {
+    logger.info(`Active host firewall detected: ${chalk.cyan(status.firewall)}. It may be dropping forwarded traffic.`);
+  }
+  logger.info(`Run ${chalk.bold.cyan('linksy doctor')} to check the firewall, forwarding and DNS setup.`);
+  logger.info('If you use ufw, firewalld, or Docker, allow traffic from 192.168.42.0/24 out to your internet interface.');
 }
 
 /**
@@ -1384,16 +1457,7 @@ export async function startWifiHotspot(options = {}) {
             await new Promise(resolve => setTimeout(resolve, 1500));
             if (isHotspotRunning()) {
               logger.success(chalk.bold.green('Concurrent Wi-Fi Hotspot is now active (2.4 GHz fallback)!'));
-              console.log(
-                '\n' + chalk.bold.cyan('📡 Wi-Fi Hotspot Details:\n') +
-                `  • Network Name (SSID): ${chalk.bold.green(ssid)}\n` +
-                `  • Password:            ${password ? chalk.bold.yellow(password) : chalk.bold.magenta('None (Open Network)')}\n` +
-                `  • Channel:             ${chalk.cyan(activeWifi.channel)} (2.4 GHz)\n` +
-                `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n\n` +
-                `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
-                `Or scan the QR code to connect instantly: ${chalk.bold.cyan('linksy qr')}\n\n` +
-                `Run ${chalk.bold.cyan('linksy off')} at any time to stop the hotspot.\n`
-              );
+              printHotspotDetails({ ssid, password, channel: activeWifi.channel, hwMode: activeWifi.hwMode });
               return;
             }
           }
@@ -1419,16 +1483,7 @@ export async function startWifiHotspot(options = {}) {
   }
 
   logger.success(chalk.bold.green('Concurrent Wi-Fi Hotspot is now active!'));
-  console.log(
-    '\n' + chalk.bold.cyan('📡 Wi-Fi Hotspot Details:\n') +
-    `  • Network Name (SSID): ${chalk.bold.green(ssid)}\n` +
-    `  • Password:            ${password ? chalk.bold.yellow(password) : chalk.bold.magenta('None (Open Network)')}\n` +
-    `  • Channel:             ${chalk.cyan(activeWifi.channel)} (${activeWifi.hwMode === 'a' ? '5 GHz' : '2.4 GHz'})\n` +
-    `  • Subnet:              192.168.42.1/24 (DHCP enabled)\n\n` +
-    `Connect your phone, tablet, or another laptop to "${chalk.bold.green(ssid)}".\n` +
-    `Or scan the QR code to connect instantly: ${chalk.bold.cyan('linksy qr')}\n\n` +
-    `Run ${chalk.bold.cyan('linksy off')} at any time to stop the hotspot.\n`
-  );
+  printHotspotDetails({ ssid, password, channel: activeWifi.channel, hwMode: activeWifi.hwMode });
 }
 
 /**
@@ -1447,6 +1502,10 @@ export function stopWifiHotspot() {
   // Direct cleanup fallback via sudo in case stop script was outdated or failed
   try {
     spawnSync('sudo', ['bash', '-c', `
+      if [ -f "${WIFI_DNSMASQ_PID_FILE}" ]; then
+        kill -9 "$(cat "${WIFI_DNSMASQ_PID_FILE}")" 2>/dev/null || true
+        rm -f "${WIFI_DNSMASQ_PID_FILE}"
+      fi
       if [ -f "${WIFI_PID_FILE}.dnsmasq" ]; then
         kill -9 "$(cat "${WIFI_PID_FILE}.dnsmasq")" 2>/dev/null || true
         rm -f "${WIFI_PID_FILE}.dnsmasq"
@@ -1459,6 +1518,7 @@ export function stopWifiHotspot() {
       fi
       killall -9 hostapd 2>/dev/null || true
       iptables -t mangle -D FORWARD -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --clamp-mss-to-pmtu 2>/dev/null || true
+      rm -f "${WIFI_STATE_FILE}" 2>/dev/null || true
       iw dev ap0 del 2>/dev/null || true
     `], { stdio: 'ignore' });
   } catch {}
@@ -1474,8 +1534,9 @@ export function stopWifiHotspot() {
 }
 
 /**
- * Returns diagnostic status of the Wi-Fi hotspot.
- * @returns {{ running: boolean, pid: number|null, ssid: string|null, channel: number|null }}
+ * Returns diagnostic status of the Wi-Fi hotspot, including the firewall/NAT
+ * setup recorded by the start script.
+ * @returns {{ running: boolean, pid: number|null, ssid: string|null, channel: number|null, password: string|null, natBackend: string|null, natOk: boolean, firewall: string|null, forwarding: boolean, uplinks: string[], dnsServers: string[], dnsmasqRunning: boolean }}
  */
 export function getWifiHotspotStatus() {
   const running = isHotspotRunning();
@@ -1502,5 +1563,26 @@ export function getWifiHotspotStatus() {
     } catch {}
   }
 
-  return { running, pid, ssid, channel, password };
+  const firewallState = readFirewallState();
+  const uplinks = firewallState.UPLINKS
+    ? firewallState.UPLINKS.split(',').map(value => value.trim()).filter(Boolean)
+    : [];
+  const dnsServers = firewallState.DNS_SERVERS
+    ? firewallState.DNS_SERVERS.split(/\s+/).map(value => value.trim()).filter(Boolean)
+    : [];
+
+  return {
+    running,
+    pid,
+    ssid,
+    channel,
+    password,
+    natBackend: firewallState.NAT_BACKEND || null,
+    natOk: firewallState.NAT_OK === '1',
+    firewall: firewallState.FIREWALL || null,
+    forwarding: firewallState.FORWARDING === '1',
+    uplinks,
+    dnsServers,
+    dnsmasqRunning: firewallState.DNSMASQ_RUNNING === '1'
+  };
 }
