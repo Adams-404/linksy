@@ -54,6 +54,15 @@ export async function statusCommand() {
       console.log(chalk.dim('   • Password:         ') + chalk.bold.magenta('None (Open Network)'));
     }
     console.log(chalk.dim('   • Channel / Band:   ') + chalk.cyan(`Channel ${wifiStatus.channel || '?'}`) + chalk.dim(` (PID: ${wifiStatus.pid})`));
+    if (wifiStatus.natBackend) {
+      const uplinkLabel = wifiStatus.uplinks.length > 0 ? ` via ${wifiStatus.uplinks.join(', ')}` : '';
+      const verifiedLabel = wifiStatus.natOk ? chalk.dim(' (verified)') : chalk.yellow(' (unverified)');
+      console.log(chalk.dim('   • NAT / Firewall:   ') + chalk.cyan(wifiStatus.natBackend) + chalk.dim(uplinkLabel) + verifiedLabel);
+    }
+    if (!wifiStatus.natOk) {
+      console.log(chalk.yellow('   • Warning:          ') + chalk.yellow('Internet forwarding could not be verified; phones may show "no internet".'));
+      console.log(chalk.dim('     Run ') + chalk.cyan('linksy doctor') + chalk.dim(' to diagnose firewall/NAT setup.'));
+    }
     console.log(chalk.dim('   • Quick Connect:    ') + chalk.cyan('Run `linksy qr` to display scannable QR code'));
 
     const devices = getConnectedDevices('ap0');

@@ -9,8 +9,10 @@ import {
   isHostapdInstalled,
   isDnsmasqInstalled,
   getActiveWifiConnection,
+  getWifiHotspotStatus,
   isChannelCompatibleWithRegion
 } from '../lib/wifiHotspot.js';
+import { detectFirewallStack } from '../lib/firewall.js';
 import { checkBluetoothAvailability } from '../lib/bluetoothPan.js';
 import { getCliVersion, checkForUpdates } from '../lib/updateNotifier.js';
 import { logger } from '../utils/logger.js';
@@ -131,6 +133,63 @@ export async function doctorCommand() {
     if (!dnsmasqOk) missingTools.push('dnsmasq');
     console.log(chalk.yellow('○') + ' ' + chalk.bold('Wi-Fi Hotspot tools:  ') + chalk.yellow(` Missing ${missingTools.join(', ')}`));
     console.log(chalk.dim(`  ↳ Run: sudo dnf install -y ${missingTools.join(' ')} (or apt/pacman equivalent) for linksy on --wifi\n`));
+  }
+
+  // Check 5b: firewall / NAT backend (phones connect but get no data without it)
+  const firewallStack = detectFirewallStack();
+  if (firewallStack.backend === 'none') {
+    allChecksPassed = false;
+    console.log(chalk.red('✖') + ' ' + chalk.bold('Firewall / NAT:       ') + chalk.red(' Neither iptables nor nftables found'));
+    console.log(chalk.yellow('  ↳ Fix:') + ' Install one so phones can reach the internet:');
+    console.log(chalk.dim('      Kali/Debian/Ubuntu: sudo apt install iptables'));
+    console.log(chalk.dim('      Fedora:             sudo dnf install iptables-nft'));
+    console.log(chalk.dim('      Arch:               sudo pacman -S iptables-nft\n'));
+  } else if (firewallStack.backend === 'iptables') {
+    console.log(
+      chalk.green('✔') + ' ' + chalk.bold('Firewall / NAT:       ') +
+      chalk.dim(` iptables found${firewallStack.iptablesBackend ? ` (${firewallStack.iptablesBackend} backend)` : ''}`)
+    );
+  } else {
+    console.log(chalk.green('✔') + ' ' + chalk.bold('Firewall / NAT:       ') + chalk.dim(' nftables found (iptables not installed, Linksy will use nft)'));
+  }
+
+  const activeHostFirewalls = [];
+  if (firewallStack.ufwActive) activeHostFirewalls.push('ufw');
+  if (firewallStack.firewalldActive) activeHostFirewalls.push('firewalld');
+  if (activeHostFirewalls.length > 0) {
+    console.log(
+      chalk.green('✔') + ' ' + chalk.bold('Host firewall:        ') +
+      chalk.dim(` ${activeHostFirewalls.join(', ')} active (Linksy adds allow rules for the hotspot)`)
+    );
+  } else {
+    console.log(chalk.dim('○') + ' ' + chalk.bold('Host firewall:        ') + chalk.dim(' ufw/firewalld not active'));
+  }
+
+  try {
+    const ipForward = fs.readFileSync('/proc/sys/net/ipv4/ip_forward', 'utf8').trim();
+    if (ipForward === '1') {
+      console.log(chalk.green('✔') + ' ' + chalk.bold('IPv4 forwarding:      ') + chalk.dim(' enabled'));
+    } else {
+      console.log(chalk.dim('○') + ' ' + chalk.bold('IPv4 forwarding:      ') + chalk.dim(' disabled (Linksy enables it when the hotspot starts)'));
+    }
+  } catch {}
+
+  // Check 5c: connectivity of an already running hotspot
+  const wifiStatus = getWifiHotspotStatus();
+  if (wifiStatus.running) {
+    if (wifiStatus.natOk) {
+      console.log(
+        chalk.green('✔') + ' ' + chalk.bold('Hotspot internet:     ') +
+        chalk.dim(` NAT verified${wifiStatus.uplinks.length ? ` via ${wifiStatus.uplinks.join(', ')}` : ''}${wifiStatus.natBackend ? ` (${wifiStatus.natBackend})` : ''}`)
+      );
+    } else {
+      console.log(chalk.red('✖') + ' ' + chalk.bold('Hotspot internet:     ') + chalk.red(' NAT could not be verified'));
+      console.log(chalk.yellow('  ↳ Fix:') + ' Phones will connect but show "no internet". Stop the hotspot with ' + chalk.cyan('linksy off') + ' and start it again so Linksy can re-apply its rules.');
+      console.log(chalk.dim('      If another firewall (Docker, VPN kill switch) manages forwarding, allow 192.168.42.0/24.'));
+      if (wifiStatus.firewall && wifiStatus.firewall !== 'none') {
+        console.log(chalk.dim(`      Detected host firewall: ${wifiStatus.firewall}\n`));
+      }
+    }
   }
 
   if (activeWifi) {
