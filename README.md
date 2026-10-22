@@ -164,11 +164,17 @@ phonenet-off
 
 Linksy v1 supports **Linux** with automatic package manager detection for:
 - **Fedora / RHEL / CentOS Stream** (`dnf`)
-- **Ubuntu / Debian / Linux Mint** (`apt`)
+- **Ubuntu / Debian / Linux Mint / Kali Linux** (`apt`)
 - **Arch Linux / Manjaro** (`pacman`)
 - **openSUSE** (`zypper`)
 
 *Manual fallback instructions are provided if your package manager is unrecognized.*
+
+> **Kali Linux note:** Kali installs `nftables` by default and treats `iptables`
+> as optional, and it has no `systemd-resolved`. Linksy detects the firewall
+> backend at runtime, falls back to `nft` when `iptables` is missing, punches
+> through nftables `policy drop` chains, and reads DNS from NetworkManager.
+> `linksy doctor` verifies NAT after the hotspot starts.
 
 ---
 
@@ -188,6 +194,7 @@ Linksy doctor checks:
 5. Is Wi-Fi AP+STA concurrent mode supported by your Wi-Fi card?
 6. Is Bluetooth PAN available for wireless fallback?
 7. Is your Linksy CLI up-to-date with the latest release on NPM?
+8. Is IPv4 forwarding enabled, and does the firewall/NAT backend actually forward hotspot traffic?
 
 For any failed step, `doctor` provides an immediate, copy-pasteable fix.
 

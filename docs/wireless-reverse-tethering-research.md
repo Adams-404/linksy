@@ -675,3 +675,87 @@ To guarantee flawless plug-and-play internet access for Windows clients without 
 6. **Mirrored in Bluetooth PAN (`bluetoothPan.js`)**:
    The same TCP MSS clamping, ICMP rules, resolv-file upstream resolution, and RFC 2132 DHCP options were applied to the Bluetooth PAN bridge (`pan0`), ensuring Windows clients connecting via Bluetooth also enjoy full internet connectivity.
 
+
+---
+
+## 17. Kali Linux: Connected Hotspot With No Internet (Firewall Backend, nftables Drop Policies, and DNS Discovery) (Released in v1.5.6)
+
+### 17.1 Symptom
+
+On Kali Linux, `linksy on --wifi` starts hostapd and dnsmasq successfully, the phone associates with the SSID, and it even receives a `192.168.42.x` lease — but every request fails. Android reports "Connected, no internet". The same build works on Fedora, Ubuntu, and Debian, which made this look like a Kali networking quirk rather than a Linksy bug.
+
+### 17.2 Root Cause Analysis
+
+Kali is not "just another Debian derivative" for hotspot setup. Four independent differences could each produce the exact same user-visible symptom, and a user could hit any combination of them:
+
+1. **`iptables` is an optional package, `nftables` is important.**
+   A default or minimal Kali install may have no `iptables` binary at all. Linksy's old script ran `iptables ...` with `|| true` guards, so NAT silently never happened. The firewall "succeeded" because every failure was swallowed.
+
+2. **`xtables-nft` lock contention.**
+   When `iptables` *is* installed on Kali it is usually `iptables-nft` (a compatibility front end over nftables). Concurrent `iptables` users — Docker, libvirt, `nftables.service` — hold the xtables lock. Without `-w`, rule insertion fails instantly with `Another app is currently holding the xtables lock`, and the `|| true` guards hid it.
+
+3. **nftables base chains with `policy drop`.**
+   Installing `nftables` on Kali often comes with `/etc/nftables.conf` containing `hook forward` / `hook input` chains whose policy is `drop`. A packet traversing netfilter is dropped by the first base chain that drops it, regardless of what an iptables `ACCEPT` rule says. This is the classic "my iptables rules are correct but nothing forwards" trap. Even DNS broke: replies to the *host's own* upstream queries arrive on the uplink and were dropped by the input chain.
+
+4. **No `systemd-resolved`.**
+   The old DNS discovery logic only looked at `/run/systemd/resolve/resolv.conf` and then `/etc/resolv.conf`. On Kali the first file does not exist, and `/etc/resolv.conf` is written by NetworkManager. Worse, the old script passed the discovered upstream *and* `1.1.1.1`/`8.8.8.8` to dnsmasq at the same time. On split-horizon, VPN, or captive-portal networks the public resolver answers first with `NXDOMAIN`, poisoning private names. On networks where only the local resolver works, the public entries add latency and intermittent failures.
+
+There was also a privilege issue: dnsmasq drops privileges to `dnsmasq`/`nobody` after startup on most distributions. Runtime files under `~/.linksy` (mode 700) were therefore unreadable/unwritable for the daemon, so leases and the upstream resolv file could not be used reliably.
+
+### 17.3 The Architectural Solution (v1.5.6)
+
+All shell generation was moved into `src/lib/firewall.js` so Wi-Fi and Bluetooth share one audited implementation.
+
+1. **Backend detection instead of assuming iptables**
+   - Look for `iptables` and `iptables-nft` on `PATH`.
+   - If neither exists, use `nft` directly with Linksy-owned tables (`ip linksy_nat`, `ip linksy_filter`).
+   - Every iptables call goes through a wrapper that adds `-w 5`, so lock contention waits instead of silently failing.
+   - If no backend exists at all, the script now exits with an explicit, actionable message instead of continuing.
+
+2. **Punch holes through nftables drop-policy chains**
+   `nft -a list ruleset` is parsed to find base chains hooked at `forward` and `input` with `policy drop`, then explicit `accept` rules are inserted for:
+   - `iifname <ap> oifname <uplink>` (phone → internet)
+   - `iifname <uplink> oifname <ap> ct state related,established` (replies)
+   - uplink `ct state related,established` on input (host's own DNS/updates)
+   - DHCP, DNS, and ICMP from the hotspot subnet on input
+
+   The awk parser works on both `nft list ruleset` layouts; the initial version missed the `hook forward` line and was caught by the E2E harness.
+
+3. **Handle ufw and firewalld explicitly**
+   `ufw` defaults to dropping forwarded traffic. When active, Linksy adds `ufw route allow` in both directions for each uplink. firewalld gets the AP interface in the `trusted` zone.
+
+4. **Uplinks are discovered, not assumed**
+   The uplink list is the active Wi-Fi interface **plus** the device carrying the default route, which covers VPNs (`tun0`), VM NAT (`eth0`), and USB modems. NAT and forward rules are installed for every uplink.
+
+5. **DNS discovery with a single source of truth**
+   Order: `/run/NetworkManager/resolv.conf` → `/run/systemd/resolve/resolv.conf` → `/etc/resolv.conf` → `nmcli -t -f IP4.DNS,IP6.DNS device show`.
+   Loopback stubs, link-local addresses, and the hotspot gateways are filtered out. dnsmasq receives a Linksy-managed `--resolv-file=/run/linksy/upstream-dns.conf`.
+   Public resolvers (`1.1.1.1`, `8.8.8.8`) are used **only** when discovery finds nothing. DHCP option 6 advertises only the hotspot address, so clients always ask the local resolver first.
+
+6. **Privilege-safe runtime files**
+   State, PID, lease, and resolv files moved to `/run/linksy` (mode 755, files 644/666). `/run` is tmpfs, so stale state also disappears on reboot.
+
+7. **Self-verification**
+   After setup, the script checks that the NAT rule exists and records `NAT_BACKEND`, `NAT_OK`, `UPLINKS`, `FIREWALL`, `FORWARDING`, and `DNS_SERVERS` to `/run/linksy/state`. `linksy status` prints the uplink and NAT backend and warns when NAT is unverified; `linksy doctor` reports the firewall backend, host firewall, forwarding state, and live NAT verification.
+
+8. **Bluetooth PAN hardening (bonus)**
+   The PAN bridge now uses the same firewall/DNS layer with its own `10.42.0.0/24` subnet, the real BlueZ controller path from sysfs/`busctl` instead of a hardcoded `/org/bluez/hci0`, and `/run/linksy/bt-dnsmasq.{pid,leases}`. dnsmasq startup is verified, and failures point at the log file.
+
+### 17.4 Verification
+
+Because no Kali machine was available, verification used a disposable Kali container with real `iptables`, `nftables`, `dnsmasq`, `ufw`, and `dhclient` (hostapd/iw stubbed, since the sandbox has no `mac80211_hwsim`). The harness executed the *real* generated scripts and checked, for each scenario: dnsmasq lease assignment, ICMP through the host, HTTP by IP, HTTP by hostname, DNS through the discovered upstream, and complete teardown.
+
+| Scenario | Environment | Result |
+| --- | --- | --- |
+| A | iptables only | pass |
+| B | iptables + ufw active | pass |
+| C | nftables `forward` **and** `input` `policy drop` | pass |
+| D | nftables only, iptables binaries hidden | pass |
+
+`RESULT: 40 passed, 0 failed` across all four scenarios. The harness caught two real bugs before release: the nftables awk parser not matching the `hook forward` line, and input drop policies blocking the host's own DNS replies (fixed with the uplink `ct state related,established` rule).
+
+The Bluetooth PAN generator was exercised through the same topology separately (`bt-harness.sh`): real `pan0` bridge, real NAT, real dnsmasq, a DHCP client in a network namespace. It passed 11/11 checks — lease, ping, HTTP by IP, HTTP by hostname, DNS through the discovered upstream, and full teardown.
+
+Unit coverage was added in `test/firewall.test.js` (parsers, awk helper against real `nft` output, generators, subnet parameter) and `test/bluetoothPan.test.js` (controller path, script contract, no hardcoded `hci0`). The full suite is 158 tests.
+
+> **Supersedes §16.3 item 3:** DHCP option 6 no longer advertises `1.1.1.1,8.8.8.8`; it advertises only the hotspot gateway. Public resolvers are a fallback inside dnsmasq, not a DHCP-advertised server.
