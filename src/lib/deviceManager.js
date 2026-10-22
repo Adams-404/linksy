@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import { execSync, spawnSync } from 'node:child_process';
 import {
   WIFI_LEASES_FILE,
+  WIFI_DNSMASQ_LEASES_FILE,
   WIFI_DENY_FILE,
   WIFI_ACCEPT_FILE,
   HOSTAPD_CTRL_DIR
@@ -116,6 +117,7 @@ export function getConnectedDevices(iface = 'ap0') {
   // Try to load leases from local Linksy directory or system fallbacks
   let leasesMap = new Map();
   const leasePaths = [
+    WIFI_DNSMASQ_LEASES_FILE,
     WIFI_LEASES_FILE,
     '/var/lib/dnsmasq/dnsmasq.leases',
     '/var/lib/misc/dnsmasq.leases',
